@@ -1,0 +1,22 @@
+class BasePolicy:
+    name = 'base'
+    type = 'unlearnable'
+
+    """ This is the template for implementing the policy for a scenario. """
+    def __init__(self, config, logger):
+        self.continue_episode = 0
+
+    def train(self, replay_buffer):
+        raise NotImplementedError()
+
+    def set_mode(self, mode):
+        raise NotImplementedError()
+
+    def get_action(self, state, infos, deterministic):
+        raise NotImplementedError()
+    
+    def get_init_action(self, scenario_config, deterministic=False):
+        raise NotImplementedError()
+
+    def load_model(self, scenario_configs=None):
+        raise NotImplementedError()

@@ -1,0 +1,12 @@
+scenario_type_dir: 'rlsan/config/scenario_type'  # 指定场景要求的目录
+scenario_type: 'DynamicObjectCrossing.json'  # 指定要测试的功能场景
+scenario_category: 'planning'
+
+route_dir: 'safebench/scenario/scenario_data/route'
+scenario_id: 1  # 指定了scenario_id的类型
+route_id: null
+save_freq: 1  # 对于场景而言,其保存频率是1
+
+ego_action_dim: 2
+ego_state_dim: 4
+ego_action_limit: 1.0

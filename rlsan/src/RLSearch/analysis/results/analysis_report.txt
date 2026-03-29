@@ -1,0 +1,88 @@
+================================================================================
+RLSAN SEARCH RESULTS ANALYSIS REPORT
+================================================================================
+
+Generated at: 2026-03-26 15:06:40
+
+================================================================================
+1. BASIC STATISTICS
+================================================================================
+Total Evaluations (Surrogate + Real):  2082200
+Real CARLA Simulations:                2682
+Surrogate Model Calls:                 2079518
+Search Time:                           49584.48 seconds
+Average Time per Evaluation:           0.0238 s
+
+================================================================================
+2. RAW FAILURES (Unfiltered)
+================================================================================
+Total Found:                           1272230
+AUC-FDC (Raw):                         1.3261e+12
+nAUC-FDC (Raw):                        5.0060e-01
+N_50 (Raw):                            6000
+FDC Curve Points:                      1000
+
+================================================================================
+3. REPRESENTATIVE FAILURES (Deduplicated)
+================================================================================
+Total Found:                           1020
+AUC-FDC (Representative):              1.7904e+09
+nAUC-FDC (Representative):             8.4299e-01
+N_50 (Representative):                 6000
+FDC Curve Points:                      1000
+Deduplication Ratio:                   1247.28x
+
+================================================================================
+4. EFFICIENCY METRICS
+================================================================================
+Raw Failures per Evaluation:           61.10%
+Representative per Evaluation:         0.05%
+Raw Failures per Second:               25.66
+Representative per Second:             0.02
+
+================================================================================
+5. FAILURE DOMAIN COVERAGE (vs Grid Search)
+================================================================================
+Ground Truth Collision Cells:           97
+
+Coverage with Raw Failures (all points):
+  Captured Cells:                        92
+  Coverage Rate (CRate_raw):             94.85%
+  Formula: CRate = |C_RLSAN| / |C_fail| × 100%
+
+Coverage with Representative Failures (deduplicated):
+  Captured Cells:                        69
+  Coverage Rate (CRate_rep):             71.13%
+  Formula: CRate = |C_RLSAN| / |C_fail| × 100%
+
+
+================================================================================
+6. INTERPRETATION
+================================================================================
+AUC-FDC (Area Under Failure Discovery Curve):
+  - Larger values indicate better early-stage search efficiency
+  - Reflects how quickly the algorithm discovers failures
+
+nAUC-FDC (Normalized Area Under Curve):
+  - Formula: nAUC = AUC / (T_total × N_max)
+  - Normalizes AUC by total budget and discovered failures
+  - Enables fair comparison across different experiments
+  - Larger values indicate better efficiency per unit budget
+
+N_50 (Budget to Find 50 Failures):
+  - Smaller values indicate higher search efficiency
+  - More stable metric than 'first failure' (avoids luck factor)
+
+Raw vs Representative:
+  - Raw: All discovered failures (quantity metric)
+  - Representative: After deduplication/clustering (quality metric)
+  - Current deduplication ratio: 1247.28x
+
+Failure Domain Coverage (FDC):
+  - Measures diversity of discovered failures compared to ground truth
+  - Test space χ is partitioned into M disjoint cells C = {c1, c2, ..., cM}
+  - Ground truth C_fail: all cells with collisions detected by grid search
+  - RLSAN result C_RLSAN: cells in C_fail that contain found failures
+  - Coverage Rate = |C_RLSAN| / |C_fail| × 100%
+  - Higher coverage indicates better coverage of failure domain
+

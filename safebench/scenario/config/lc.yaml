@@ -1,0 +1,24 @@
+scenario_type_dir: 'safebench/scenario/config/scenario_type'
+scenario_type: 'DynamicObjectCrossing.json'
+scenario_category: 'planning'
+policy_type: 'lc'
+
+route_dir: 'safebench/scenario/scenario_data/route'
+scenario_id: 1
+route_id: null
+# ！！！注意修改standard_action_dim为True代表4维测试,False代表3维测试
+standard_action_dim: False
+
+ego_action_dim: 2
+ego_state_dim: 4
+ego_action_limit: 1.0
+
+# for REINFORCE policy model
+model_path: 'safebench/scenario/scenario_data/model_ckpt/lc'
+model_id: weight  # model's name to save
+buffer_capacity: 400
+batch_size: 16  # initial 16
+lr: 0.004
+eval_in_train_freq: 10
+save_freq: 10 # initial 10
+train_episode: 1500  # initial 1000
