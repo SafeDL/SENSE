@@ -1,5 +1,5 @@
 """
-加载真实的蒙特卡洛采样结果
+加载真实的蒙特卡洛仿真结果
 """
 import numpy as np
 import openpyxl

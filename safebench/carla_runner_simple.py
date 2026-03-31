@@ -35,7 +35,7 @@ class CarlaRunner:
 
         if self.step_by_step:
             # 确保每次运行的时候文件夹被清空(用于代理模型的迭代步进更新)
-            exp_dir = os.path.join('/home/hp/SENSE/log/baselines', self.exp_name)
+            exp_dir = os.path.join('/home/hp/SENSE/log', self.exp_name)
             if os.path.exists(exp_dir):
                 os.system('rm -rf ' + exp_dir)
         else:
@@ -250,7 +250,7 @@ class CarlaRunner:
 
             # 不仅仅是碰撞,还要筛选那些危险性更大且更稀疏场景
             if collision > 0:
-                y = screen_most_risky_scores(init_score, exp_name=self.exp_name, log_base_dir='/home/hp/SENSE/log/baselines')
+                y = screen_most_risky_scores(init_score, exp_name=self.exp_name, log_base_dir='/home/hp/SENSE/log')
             else:
                 y = y_init
 

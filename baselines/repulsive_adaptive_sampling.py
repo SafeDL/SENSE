@@ -224,6 +224,23 @@ def optimize_candidates(candidates, known_samples, known_scores, bounds, iterati
     return optimized_candidates
 
 
+def print_diagnostics(evaluator, current_iter, n_calls, cumulative_raw, known_samples,
+                     real_sim_budget, batch_size, phase_name=""):
+    """打印诊断信息用于判断搜索是否正确恢复"""
+    print("\n" + "="*85)
+    print(f"[DIAGNOSTICS] {phase_name}")
+    print("="*85)
+    print(f"  迭代进度:        {current_iter}/{n_calls} ({100*current_iter/n_calls:.1f}%)")
+    print(f"  已评估样本数:    {len(known_samples)}")
+    print(f"  危险场景数:      {cumulative_raw}")
+    print(f"  代理模型调用:    {evaluator.surrogate_call_count}")
+    print(f"  真实仿真次数:    {evaluator.real_simulation_count}/{real_sim_budget}")
+    print(f"  总评估次数:      {evaluator.evaluation_count}")
+    print(f"  真实仿真剩余:    {max(0, real_sim_budget - evaluator.real_simulation_count)}")
+    print(f"  批大小:          {batch_size}")
+    print("="*85 + "\n")
+
+
 def run_adaptive_sampling(evaluator, bounds, n_calls=1000, batch_size=10, output_dir='log',
                         real_sim_budget=2000, collision_threshold=0.3, checkpoint_interval=50):
     """
@@ -251,6 +268,7 @@ def run_adaptive_sampling(evaluator, bounds, n_calls=1000, batch_size=10, output
     n_50_raw = -1
     cumulative_raw = 0
     start_iter = 0
+    last_checkpoint_iter = 0  # 用于追踪进度
 
     # 尝试加载检查点
     if osp.exists(checkpoint_path):
@@ -270,8 +288,10 @@ def run_adaptive_sampling(evaluator, bounds, n_calls=1000, batch_size=10, output
             evaluator.evaluation_count = ckpt['eval_count']
             evaluator.surrogate_call_count = ckpt['surrogate_call_count']
             evaluator.real_simulation_count = ckpt['real_sim_count']
+            last_checkpoint_iter = start_iter
             print(f"[✓] Resumed from checkpoint: iteration {start_iter}/{n_calls}")
-            print(f"    Evaluations: {evaluator.evaluation_count}, Real sims: {evaluator.real_simulation_count}, Hazardous: {cumulative_raw}")
+            print_diagnostics(evaluator, start_iter, n_calls, cumulative_raw, known_samples,
+                             real_sim_budget, batch_size, "Checkpoint Loaded")
         except Exception as e:
             print(f"[!] Failed to load checkpoint: {e}, starting fresh")
             start_iter = 0
@@ -337,18 +357,91 @@ def run_adaptive_sampling(evaluator, bounds, n_calls=1000, batch_size=10, output
                        fdc_curve_raw, n_50_raw)
     else:
         print(f">> Initialization Phase skipped (already completed in checkpoint)")
+        print_diagnostics(evaluator, start_iter, n_calls, cumulative_raw, known_samples,
+                         real_sim_budget, batch_size, "After Checkpoint Load")
 
     # 2. 自适应采样阶段 (Adaptive Phase)
-    current_iter = max(start_iter, init_count)
-    remaining_budget = n_calls - current_iter
+    current_iter = start_iter  # 从断点位置继续，而非重置为 init_count
 
+    # 如果还未完成初始化，先完成初始化
+    if current_iter < init_count:
+        print(f">> Completing Initialization Phase: {current_iter}/{init_count} already done")
+        for i in tqdm(range(current_iter, init_count), desc="Initialization", unit="eval"):
+            sample = np.array([np.random.uniform(b[0], b[1]) for b in bounds])
+            score = evaluator.evaluate(sample)
+            known_samples.append(sample)
+            known_scores.append(score)
+            all_scenarios_log.append(sample)
+            all_scores_log.append(score)
+
+            if score > collision_threshold:
+                cumulative_raw += 1
+                hazardous_scenarios_log.append(sample)
+                hazardous_scores_log.append(score)
+                search_budget = evaluator.evaluation_count
+                fdc_curve_raw.append((search_budget, cumulative_raw))
+                if cumulative_raw >= 50 and n_50_raw == -1:
+                    n_50_raw = search_budget
+
+            current_iter = i + 1
+
+            if current_iter % checkpoint_interval == 0:
+                ckpt = {
+                    'iteration': current_iter,
+                    'known_samples': known_samples,
+                    'known_scores': known_scores,
+                    'all_scenarios_log': all_scenarios_log,
+                    'all_scores_log': all_scores_log,
+                    'hazardous_scenarios_log': hazardous_scenarios_log,
+                    'hazardous_scores_log': hazardous_scores_log,
+                    'fdc_curve_raw': fdc_curve_raw,
+                    'n_50_raw': n_50_raw,
+                    'cumulative_raw': cumulative_raw,
+                    'eval_count': evaluator.evaluation_count,
+                    'surrogate_call_count': evaluator.surrogate_call_count,
+                    'real_sim_count': evaluator.real_simulation_count,
+                }
+                with open(checkpoint_path, 'wb') as f:
+                    pickle.dump(ckpt, f)
+
+            if evaluator.real_simulation_count >= real_sim_budget:
+                print(f"[!] Real simulation budget reached ({real_sim_budget}), stopping at initialization {current_iter}/{init_count}")
+                return (np.array(all_scenarios_log), np.array(all_scores_log),
+                       np.array(hazardous_scenarios_log), np.array(hazardous_scores_log),
+                       fdc_curve_raw, n_50_raw)
+        current_iter = init_count
+
+    # 进入自适应阶段
+    remaining_budget = n_calls - current_iter
     if remaining_budget > 0:
+        print(f">> Adaptive Phase: {current_iter}/{n_calls} completed, {remaining_budget} remaining")
+        print_diagnostics(evaluator, current_iter, n_calls, cumulative_raw, known_samples,
+                         real_sim_budget, batch_size, "Entering Adaptive Phase")
+
+        # 检查真实仿真预算
+        real_sim_remaining = real_sim_budget - evaluator.real_simulation_count
+        if real_sim_remaining <= 0:
+            print(f"[!] Real simulation budget exhausted ({evaluator.real_simulation_count}/{real_sim_budget})")
+            print(f"[!] Switching to surrogate-only mode (no more real simulations)")
+            # 禁用真实仿真
+            evaluator.use_real_sim = False
+        else:
+            print(f"[*] Real simulation budget remaining: {real_sim_remaining}/{real_sim_budget}")
+
         num_batches = int(np.ceil(remaining_budget / batch_size))
-        
+
         for b in tqdm(range(num_batches), desc="Adaptive Phase", unit="batch"):
             current_batch_size = min(batch_size, n_calls - current_iter)
             if current_batch_size <= 0:
                 break
+
+            # 每10个batch打印进度
+            if b % 10 == 0 and b > 0:
+                progress_pct = 100 * current_iter / n_calls
+                iter_delta = current_iter - last_checkpoint_iter
+                print(f"[Progress] Iter: {current_iter}/{n_calls} ({progress_pct:.1f}%) | "
+                      f"Real sims: {evaluator.real_simulation_count}/{real_sim_budget} | "
+                      f"Hazardous: {cumulative_raw} | Delta: +{iter_delta}")
 
             # A. 生成初始随机候选点
             raw_candidates = np.array([
@@ -357,19 +450,36 @@ def run_adaptive_sampling(evaluator, bounds, n_calls=1000, batch_size=10, output
             ])
 
             # B. 内层循环优化 (Inner Loop Optimization)
-            # 在这里构建KDTree以加速邻近查询
             optimized_candidates = optimize_candidates(
                 raw_candidates,
                 np.array(known_samples),
                 np.array(known_scores),
                 bounds,
-                iterations=30,  # 移动步数
-                step_size=0.05  # 移动步长
+                iterations=30,
+                step_size=0.05
             )
 
             # C. 仿真评估优化后的点
             for idx, candidate in enumerate(optimized_candidates):
+                if current_iter >= n_calls:
+                    break
+
+                # 评估前检查真实仿真预算
+                if evaluator.real_simulation_count >= real_sim_budget:
+                    print(f"[!] Real simulation budget reached ({evaluator.real_simulation_count}/{real_sim_budget}), stopping")
+                    return (np.array(all_scenarios_log), np.array(all_scores_log),
+                           np.array(hazardous_scenarios_log), np.array(hazardous_scores_log),
+                           fdc_curve_raw, n_50_raw)
+
+                # 记录评估前的代理调用数
+                surrogate_before = evaluator.surrogate_call_count
+                real_sim_before = evaluator.real_simulation_count
+
                 score = evaluator.evaluate(candidate)
+
+                # 检查是否使用了代理模型或真实仿真
+                surrogate_delta = evaluator.surrogate_call_count - surrogate_before
+                real_sim_delta = evaluator.real_simulation_count - real_sim_before
 
                 # 更新知识库
                 known_samples.append(candidate)
@@ -389,8 +499,17 @@ def run_adaptive_sampling(evaluator, bounds, n_calls=1000, batch_size=10, output
 
                 current_iter += 1
 
+            # 每50个样本打印一次详细信息
+                if current_iter % 50 == 0:
+                    eval_type = "Real" if real_sim_delta > 0 else "Surrogate"
+                    print(f"[{current_iter:6d}] {eval_type:9s} | Score: {score:.4f} | "
+                          f"Surr: {evaluator.surrogate_call_count:5d} | "
+                          f"Real: {evaluator.real_simulation_count:4d}/{real_sim_budget} | "
+                          f"Hazard: {cumulative_raw:4d}")
+
                 # 保存检查点
                 if current_iter % checkpoint_interval == 0:
+                    last_checkpoint_iter = current_iter
                     ckpt = {
                         'iteration': current_iter,
                         'known_samples': known_samples,
@@ -415,6 +534,9 @@ def run_adaptive_sampling(evaluator, bounds, n_calls=1000, batch_size=10, output
                     return (np.array(all_scenarios_log), np.array(all_scores_log),
                            np.array(hazardous_scenarios_log), np.array(hazardous_scores_log),
                            fdc_curve_raw, n_50_raw)
+
+            if current_iter >= n_calls:
+                break
 
     # 排序返回 (scenarios和scores必须对应)
     results = sorted(zip(all_scenarios_log, all_scores_log), key=lambda x: x[1], reverse=True)
@@ -447,7 +569,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=2004)
     parser.add_argument('--tm_port', type=int, default=8004)
     parser.add_argument('--fixed_delta_seconds', type=float, default=0.1)
-    parser.add_argument('--budget', type=int, default=2000000, help='Total number of evaluations')
+    parser.add_argument('--budget', type=int, default=20, help='Total number of evaluations')
     parser.add_argument('--batch_size', type=int, default=2000, help='Batch size for inner loop optimization')
     parser.add_argument('--use_surrogate', type=bool, default=True, help='Use surrogate model for acceleration')
     parser.add_argument('--surrogate_model_path', type=str,

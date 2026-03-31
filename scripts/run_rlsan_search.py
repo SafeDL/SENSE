@@ -199,11 +199,13 @@ if __name__ == '__main__':
 
     # 计算最终的代表性点数（去重后）
     final_ncs = 0
+    representative_points = np.array([])
     if len(hazardous_points) > 0:
         hp_array = np.array(hazardous_points)
         fv_array = np.array([args.danger_threshold - 0.01]*len(hp_array))
         seeds_info = select_representative_seeds(hp_array, fv_array, niche_radius=args.niche_radius)
         final_ncs = len(seeds_info['representative'])
+        representative_points = seeds_info['representative']
 
     hazardous_points = np.array(hazardous_points) if hazardous_points else np.array([])
     print(f"\nOptimization completed in {search_time:.2f} seconds.")
@@ -231,6 +233,7 @@ if __name__ == '__main__':
     # 仅保存危险场景点到pkl文件
     results = {
         'hazardous_points': hazardous_points,
+        'representative_points': representative_points,
         'raw_failures_count': len(hazardous_points),
         'representative_failures_count': final_ncs,
         'total_evaluations': env.evaluation_count,

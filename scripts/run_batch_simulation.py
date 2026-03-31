@@ -15,7 +15,7 @@ from safebench.carla_runner_simple import CarlaRunner
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp_name', type=str, default='scenario05_10000')
+    parser.add_argument('--exp_name', type=str, default='scenario01_14000')
     parser.add_argument('--output_dir', type=str, default='log')
     parser.add_argument('--ROOT_DIR', type=str, default=osp.abspath(osp.dirname(osp.dirname(osp.realpath(__file__)))))
     parser.add_argument('--auto_ego', type=bool, default=False)
@@ -32,8 +32,8 @@ if __name__ == '__main__':
     parser.add_argument('--save_video', type=bool, default=False)
     parser.add_argument('--render', type=bool, default=False)
     parser.add_argument('--frame_skip', '-fs', type=int, default=1, help='skip of frame in each step')
-    parser.add_argument('--port', type=int, default=2020, help='port to communicate with carla')
-    parser.add_argument('--tm_port', type=int, default=8020, help='traffic manager port')
+    parser.add_argument('--port', type=int, default=2028, help='port to communicate with carla')
+    parser.add_argument('--tm_port', type=int, default=8028, help='traffic manager port')
     parser.add_argument('--fixed_delta_seconds', type=float, default=0.1)
     args = parser.parse_args()
     args_dict = vars(args)
@@ -55,7 +55,7 @@ if __name__ == '__main__':
 
     with open(os.path.join('/home/hp/SENSE/log', 'sampled_parameters.pkl'), 'rb') as f:
         sampled_parameters = pkl.load(f)
-    test_cases = sampled_parameters[8000:10000,:]
+    test_cases = sampled_parameters[12000:14000,:]
     runner = CarlaRunner(agent_config, scenario_config, step_by_step=False)
     runner.run(test_cases)
 

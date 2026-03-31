@@ -2,7 +2,7 @@
 step3: 将RLSearch找到的高维测试空间中的失效域进行聚类
 高维测试空间中的自动驾驶失效域概率分布应该呈现出一定的多峰性, 这意味着在高维空间中可能存在多个局部最小值
 但是现有研究都不能很好地捕捉到这种多峰性,本代码使用TDA拓扑分析来判定多峰性
-从而确定GMM的簇个数K以及每个簇的初始均值位置
+从而确定GMM的簇个数K
 """
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,72 +17,100 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+
 def load_data(filepath):
     """加载数据"""
     with open(filepath, 'rb') as f:
         data = pickle.load(f)
-    print(f"Data Loaded: Shape {data.shape}")
-    return data
+
+    risky_cases = data['representative_points']
+    print(f"Data Loaded: Shape {risky_cases.shape}")
+    return risky_cases
 
 
-def tda_get_num_components(X, plot=True, decay_threshold=0.5):
+def _find_multiple_eigengap(lifetimes, eta=0.5):
+    """多重特征间隙法 (Multiple Eigengap)
+    不再寻求单一的全局最大间隙，而是捕获所有大于最大间隙 eta 倍的显著信号间隙，
+    以包容多频段的多峰结构。
+    """
+    if len(lifetimes) <= 1:
+        return len(lifetimes) + 1
+        
+    gaps = lifetimes[:-1] - lifetimes[1:]
+    
+    # 1. 计算判定阈值
+    max_gap = np.max(gaps)
+    threshold_delta = eta * max_gap
+    
+    # 2. 提取所有显著落差的索引集合 S
+    S = np.where(gaps >= threshold_delta)[0]
+    
+    # 3. 确定最终 K*: 取最后一个显著落差的位置
+    last_significant_idx = np.max(S)
+    
+    # gap位于 idx 和 idx+1 之间。代表前 idx+1 个元素属于信号。
+    # 额外加上1个无限相连组件，因此共有 idx+2 个聚类
+    return last_significant_idx + 2
+
+
+def tda_get_num_components(X, plot=True, eta=0.5):
     """
     利用持久同调(Persistent Homology)分析失效模式数量(K值)
+    采用多重特征间隙法 (Multiple Eigengap) 确定最优K值
 
     参数:
         X: 输入数据 (N_samples, N_features)
-        decay_threshold:用于区分信号和噪声的阈值比例。
-                        (生命周期 < max_lifetime * threshold 的被视为噪声)
+        plot: 是否输出持久图和包含阈值划分的生命周期排序图
+
     返回:
         n_components: 建议的GMM组件数量
-        initial_means: 基于拓扑聚类的粗略中心估计 (可选)
     """
     print("Running TDA to determine structural modes...")
 
-    # 1. 如果维度过高(>50), 先用PCA降噪, 保留主要方差, 避免高维稀疏性影响TDA
+    # 1. 维度降低
     if X.shape[1] > 50:
-        pca = PCA(n_components=0.95)  # 保留95%方差
+        pca = PCA(n_components=0.95)
         X_tda = pca.fit_transform(X)
         print(f"PCA reduced dimension to {X_tda.shape[1]} for TDA analysis.")
     else:
         X_tda = X
 
-    # 2. 为了加速计算，如果样本量极大，可采用Landmark采样(此处假设样本量<5000)
-    # 计算持久图 (maxdim=0 关注连通分量 H0)
-    # ripser 计算 H0 非常快
+    # 2. 计算持久图
     result = ripser(X_tda, maxdim=0)
     diagrams = result['dgms']
-
-    # 提取 H0 特征 (birth, death)
-    # H0 的 birth 都是 0, 我们只关心 death time (即生命周期 lifetime)
-    # 最后一个分量的 death 是 inf，代表整体连通性
     lifetimes = diagrams[0][:-1, 1]
-    lifetimes = np.sort(lifetimes)[::-1]  # 降序排列
+    lifetimes = np.sort(lifetimes)[::-1]
 
-    # 3. 确定 K 值 (寻找寿命骤降点 - Eigengap heuristic)
-    # 方法：找到最大的 gap，或者保留生命周期显著长的分量
-    if len(lifetimes) == 0:
-        return 1
+    if len(lifetimes) <= 1:
+        return len(lifetimes) + 1
 
-    # 简单策略：保留生命周期大于最大生命周期 10% 的分量
-    max_life = lifetimes[0]
-    significant_indices = np.where(lifetimes > max_life * decay_threshold)[0]
-    n_components = len(significant_indices) + 1  # +1 是因为包含那个 infinite 的主分量
+    # 3. 确定 K 值 (使用多重间隙法)
+    n_components = _find_multiple_eigengap(lifetimes, eta=eta)
 
-    print(f"TDA Analysis Result: Found {n_components} significant topological clusters.")
+    gaps = lifetimes[:-1] - lifetimes[1:]
+
+    # 计算用于画横线的 Y 轴阈值（取最后一个显著断崖的两点均值作为门槛可视线）
+    split_idx = n_components - 2
+    if split_idx >= 0 and split_idx + 1 < len(lifetimes):
+        y_threshold = (lifetimes[split_idx] + lifetimes[split_idx + 1]) / 2.0
+    else:
+        y_threshold = lifetimes[-1]
+
+    print(f"TDA Analysis Result: Found {n_components} significant topological clusters (Multiple Eigengap)")
+    print(f"  Top 3 gaps: {sorted(enumerate(gaps), key=lambda x: x[1], reverse=True)[:3]}")
 
     if plot:
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(12, 5))
 
         # 子图1: 持久图
         plt.subplot(1, 2, 1)
         plot_diagrams(diagrams, show=False)
         plt.title("Persistence Diagram (H0)")
 
-        # 子图2: 生命周期排序图 (Scree Plot 风格)
+        # 子图2: 生命周期排序图
         plt.subplot(1, 2, 2)
-        plt.plot(range(1, len(lifetimes) + 1), lifetimes, 'o-', markerfacecolor='r')
-        plt.axhline(y=max_life * decay_threshold, color='g', linestyle='--', label='Noise Threshold')
+        plt.plot(range(1, len(lifetimes) + 1), lifetimes, 'o-', markerfacecolor='r', label='Lifetimes')
+        plt.axhline(y=y_threshold, color='g', linestyle='--', linewidth=2, label=f'Multiple Eigengap Threshold (K={n_components})')
         plt.xlabel("Component Rank")
         plt.ylabel("Lifetime (Persistence)")
         plt.title("Topological 'Scree Plot'")
@@ -138,12 +166,12 @@ def visualize_gmm_results(X, gmm):
 
 def main():
     # 1. 加载 RL 搜索出的失效样本
-    file_path = '../../results/s1exp/rl_searched_cases.pkl'
+    file_path = '../../results/s1exp/new_search_results.pkl'
     X_data = load_data(file_path)
 
     # 2. TDA 分析确定组件数
-    # decay_threshold 越小，保留的簇越多（越敏感）
-    k_optimal = tda_get_num_components(X_data, plot=True, decay_threshold=0.5)
+    # 利用多重间隙方法自适应寻找保留的簇个数
+    k_optimal = tda_get_num_components(X_data, plot=True, eta=0.5)
 
     # 4. 拟合 GMM
     gmm_model = fit_topological_gmm(X_data, k_optimal)
@@ -152,7 +180,6 @@ def main():
     visualize_gmm_results(X_data, gmm_model)
 
     # 6. 保存模型供 Importance Sampling 模块使用
-    # 注意：保存时最好同时也保存 scaler, 因为预测新数据需要同样的 scaling
     model_data = {
         'gmm': gmm_model,
         'tda_k': k_optimal

@@ -1,3 +1,7 @@
+"""
+验证重要性采样方法相比较于传统的蒙特卡罗方法,在寻找测试空间中罕见的失效事件的优势,
+特别是评估IS方法能否发现MC难以探测的盲区
+"""
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt

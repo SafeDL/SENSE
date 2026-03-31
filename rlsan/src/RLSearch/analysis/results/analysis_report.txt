@@ -2,7 +2,7 @@
 RLSAN SEARCH RESULTS ANALYSIS REPORT
 ================================================================================
 
-Generated at: 2026-03-26 15:06:40
+Generated at: 2026-03-30 13:47:02
 
 ================================================================================
 1. BASIC STATISTICS
@@ -51,8 +51,8 @@ Coverage with Raw Failures (all points):
   Formula: CRate = |C_RLSAN| / |C_fail| × 100%
 
 Coverage with Representative Failures (deduplicated):
-  Captured Cells:                        69
-  Coverage Rate (CRate_rep):             71.13%
+  Captured Cells:                        74
+  Coverage Rate (CRate_rep):             76.29%
   Formula: CRate = |C_RLSAN| / |C_fail| × 100%
 
 

@@ -127,38 +127,22 @@ class SearchResultsAnalyzer:
         self.captured_cells_raw = len(captured_raw)
         self.coverage_rate_raw = (self.captured_cells_raw / len(self.ground_truth_cells) * 100) if self.ground_truth_cells else 0.0
 
-        # Coverage with representative failures (use representative_failures count as proxy)
-        # Since we already have representative_failures count from run_rlsan_search.py
-        # We estimate coverage by clustering nearby found points
-        if len(self.hazardous_points) > 1:
-            # Simple clustering: use distance-based deduplication
+        # Coverage with representative failures (use representative_points directly if available)
+        representative_points = self.results.get('representative_points', np.array([]))
+
+        if len(representative_points) > 0:
+            # Use representative_points directly from results
             captured_rep = set()
-            niche_radius = 0.05  # Same as in search
-            processed = set()
-
-            for i, point in enumerate(self.hazardous_points):
-                if i in processed:
-                    continue
-
-                # Find nearby points (within niche_radius)
-                is_representative = True
-                for j, other_point in enumerate(self.hazardous_points):
-                    if i != j and j not in processed:
-                        dist = np.linalg.norm(point - other_point)
-                        if dist < niche_radius:
-                            is_representative = True
-                            processed.add(j)
-
-                if is_representative:
-                    grid_idx = self._point_to_grid_index(point)
-                    key = f"{grid_idx[0]}_{grid_idx[1]}_{grid_idx[2]}"
-                    if key in self.ground_truth_cells:
-                        captured_rep.add(key)
-                    processed.add(i)
+            for point in representative_points:
+                grid_idx = self._point_to_grid_index(point)
+                key = f"{grid_idx[0]}_{grid_idx[1]}_{grid_idx[2]}"
+                if key in self.ground_truth_cells:
+                    captured_rep.add(key)
 
             self.captured_cells_rep = len(captured_rep)
             self.coverage_rate_rep = (self.captured_cells_rep / len(self.ground_truth_cells) * 100) if self.ground_truth_cells else 0.0
         else:
+            # Fallback: use raw coverage if representative_points not available
             self.captured_cells_rep = self.captured_cells_raw
             self.coverage_rate_rep = self.coverage_rate_raw
 
@@ -737,7 +721,7 @@ class SearchResultsAnalyzer:
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze RLSAN search results with coverage metrics')
-    parser.add_argument('--results_path', type=str, default='../../../../log/search_results.pkl',
+    parser.add_argument('--results_path', type=str, default='../../../../log/new_search_results.pkl',
                        help='Path to search_results.pkl file')
     parser.add_argument('--output_dir', type=str, default='results',
                        help='Directory to save analysis plots and reports')

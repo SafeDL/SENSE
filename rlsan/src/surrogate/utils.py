@@ -64,8 +64,8 @@ def save_surrogate_model(model, likelihood, filename):
     X_train = model.train_inputs[0].cpu().numpy()
     Y_train = model.train_targets.cpu().numpy().reshape(-1, 1)
     serializable_model = {
-        'model_state': model.cpu().state_dict(),
-        'likelihood_state': likelihood.cpu().state_dict(),
+        'model_state': {k: v.cpu() for k, v in model.state_dict().items()},
+        'likelihood_state': {k: v.cpu() for k, v in likelihood.state_dict().items()},
         'X_train': X_train,
         'Y_train': Y_train,
         'kernel_type': 'MaternKernel(nu=2.5)',

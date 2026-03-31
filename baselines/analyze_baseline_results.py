@@ -105,15 +105,15 @@ class BaselineAnalyzer:
         indices = np.clip(indices, 0, self.grid_resolution - 1)
         return indices
 
-    def _compute_coverage_rate(self, hazardous_points):
-        """Compute failure domain coverage rate"""
+    def _compute_coverage_rate(self, hazardous_points, representative_points=None):
+        """Compute failure domain coverage rate (raw and representative)"""
         # 如果没有网格数据或没有危险点，返回 0
         if not self.ground_truth_cells:
             print(f"[!] Warning: No ground truth cells available (grid data not loaded)")
-            return 0.0, 0, 0
+            return 0.0, 0, 0, 0.0, 0
 
         if len(hazardous_points) == 0:
-            return 0.0, 0, len(self.ground_truth_cells)
+            return 0.0, 0, len(self.ground_truth_cells), 0.0, 0
 
         hazardous_points = np.atleast_2d(hazardous_points)
 
@@ -128,7 +128,22 @@ class BaselineAnalyzer:
         captured_cells_raw = len(captured_raw)
         coverage_rate_raw = (captured_cells_raw / len(self.ground_truth_cells) * 100) if self.ground_truth_cells else 0.0
 
-        return coverage_rate_raw, captured_cells_raw, len(self.ground_truth_cells)
+        # Coverage with representative failures (if available)
+        coverage_rate_rep = 0.0
+        captured_cells_rep = 0
+        if representative_points is not None and len(representative_points) > 0:
+            representative_points = np.atleast_2d(representative_points)
+            captured_rep = set()
+            for point in representative_points:
+                grid_idx = self._point_to_grid_index(point)
+                key = f"{grid_idx[0]}_{grid_idx[1]}_{grid_idx[2]}"
+                if key in self.ground_truth_cells:
+                    captured_rep.add(key)
+
+            captured_cells_rep = len(captured_rep)
+            coverage_rate_rep = (captured_cells_rep / len(self.ground_truth_cells) * 100) if self.ground_truth_cells else 0.0
+
+        return coverage_rate_raw, captured_cells_raw, len(self.ground_truth_cells), coverage_rate_rep, captured_cells_rep
 
     def load_baseline_results(self):
         """Load all baseline results from directory"""
@@ -165,6 +180,7 @@ class BaselineAnalyzer:
 
                     # Extract basic metrics
                     hazardous_points = data.get('hazardous_points', np.array([]))
+                    representative_points = data.get('representative_points', np.array([]))
                     total_evals = data.get('total_evaluations', 1)
                     raw_failures = data.get('raw_failures_count', len(hazardous_points))
                     rep_failures = data.get('representative_failures_count', raw_failures)
@@ -173,15 +189,16 @@ class BaselineAnalyzer:
                     surrogate_calls = data.get('surrogate_calls', 0)
 
                     # 总是尝试从网格数据计算覆盖率（如果可用）
-                    # 即使基线结果中已有覆盖率数据，也要重新计算以确保一致性
                     if self.ground_truth_cells:
-                        coverage_rate_raw, captured_cells_raw, ground_truth_cells = \
-                            self._compute_coverage_rate(hazardous_points)
+                        coverage_rate_raw, captured_cells_raw, ground_truth_cells, coverage_rate_rep, captured_cells_rep = \
+                            self._compute_coverage_rate(hazardous_points, representative_points)
                         print(f"  [*] {baseline_names[key]}: Computed coverage from grid data")
                     else:
                         # 如果没有网格数据，使用基线结果中的数据（可能为 0）
                         coverage_rate_raw = data.get('coverage_rate_raw', 0.0)
                         captured_cells_raw = data.get('captured_cells_raw', 0)
+                        coverage_rate_rep = data.get('coverage_rate_rep', 0.0)
+                        captured_cells_rep = data.get('captured_cells_rep', 0)
                         ground_truth_cells = data.get('ground_truth_cells', 0)
                         if coverage_rate_raw == 0.0 and ground_truth_cells == 0:
                             print(f"  [!] {baseline_names[key]}: No coverage data (grid data not loaded)")
@@ -202,6 +219,7 @@ class BaselineAnalyzer:
                         'method': baseline_names[key],
                         'algorithm': key,
                         'hazardous_points': hazardous_points,
+                        'representative_points': representative_points,
                         'raw_failures_count': raw_failures,
                         'representative_failures_count': rep_failures,
                         'total_evaluations': total_evals,
@@ -210,6 +228,8 @@ class BaselineAnalyzer:
                         'search_time': search_time,
                         'coverage_rate_raw': coverage_rate_raw,
                         'captured_cells_raw': captured_cells_raw,
+                        'coverage_rate_rep': coverage_rate_rep,
+                        'captured_cells_rep': captured_cells_rep,
                         'ground_truth_cells': ground_truth_cells,
                         # FDC metrics (may not be available for baselines)
                         'auc_fdc_raw': auc_fdc_raw,
@@ -582,7 +602,7 @@ def main():
                        help='Path to grid X coordinates (scenario01_grid_x.pkl)')
     parser.add_argument('--grid_y', type=str, default='../rlsan/src/surrogate/train_data/scenario01_grid_y.pkl',
                        help='Path to grid Y values (scenario01_grid_y.pkl)')
-    parser.add_argument('--output_dir', type=str, default='results/baseline_comparison',
+    parser.add_argument('--output_dir', type=str, default='../log/baseline_comparison',
                        help='Directory to save comparison analysis')
     parser.add_argument('--collision_threshold', type=float, default=0.3,
                        help='Threshold for collision detection in grid search')

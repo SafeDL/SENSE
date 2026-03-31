@@ -1,3 +1,6 @@
+"""
+基于交叉熵方法的重要性采样分布的计算方法
+"""
 import os.path as osp
 import pickle
 import argparse
