@@ -794,7 +794,16 @@ class StateAwareNichePSO:
             
             state_info = self.state_tracker.update(g, positions, gbest_pos, stagnation)
             self.current_state_infos[g] = state_info
-
+        
+        # 2. 获取状态和选择动作 (Macro Command Mode)
+        # 逻辑：
+        # - 在 Decision Step (t):
+        #   1. 如果有缓存的 (S_{t-K}, A_{t-K})，结合当前 S_t 和累积奖励 R_accum，存储 transition
+        #   2. 观测当前 S_t，选择新动作 A_t
+        #   3. 缓存 S_t, A_t，重置 R_accum
+        # - 在 Execution Step:
+        #   1. 维持 A_t
+        
         is_decision_step = (self.iteration_count % self.action_interval == 0)
         current_step_states = []  # 暂存当前步计算出的状态
         

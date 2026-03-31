@@ -134,10 +134,9 @@ class SACAgent(BaseRLAgent, ContinuousActionMixin):
                  buffer_size: int = 100000,
                  device: str = 'cuda'):
         super().__init__()
-
+        
         self.state_dim = state_dim
         self._action_dim = action_dim
-        self.hidden_dims = hidden_dims  # ← 保存 hidden_dims
         self.gamma = gamma
         self.tau = tau
         self.batch_size = batch_size
@@ -298,8 +297,7 @@ class SACAgent(BaseRLAgent, ContinuousActionMixin):
             'log_alpha': self.log_alpha if self.auto_entropy_tuning else None,
             'config': {
                 'state_dim': self.state_dim,
-                'action_dim': self._action_dim,
-                'hidden_dims': self.hidden_dims
+                'action_dim': self._action_dim
             }
         }, path)
         print(f"[SAC] Model saved to {path}")
@@ -308,12 +306,8 @@ class SACAgent(BaseRLAgent, ContinuousActionMixin):
     def load(cls, path: str, freeze: bool = True):
         checkpoint = torch.load(path, map_location='cpu')
         config = checkpoint.get('config', {})
-        agent = cls(
-            state_dim=config.get('state_dim', 25),
-            action_dim=config.get('action_dim', 4),
-            hidden_dims=config.get('hidden_dims', [128, 128, 64])  # ← 改成旧模型的架构
-        )
-
+        agent = cls(state_dim=config.get('state_dim', 25))
+        
         agent.actor.load_state_dict(checkpoint['actor'])
         agent.critic.load_state_dict(checkpoint['critic'])
         agent.critic_target.load_state_dict(checkpoint['critic'])
@@ -328,3 +322,21 @@ class SACAgent(BaseRLAgent, ContinuousActionMixin):
             
         print(f"[SAC] Loaded from {path}")
         return agent
+
+    def compute_policy_entropy(self, state: np.ndarray) -> float:
+        """
+        计算当前状态下策略分布的熵 (nats)。
+        SAC 使用 Tanh-Squashed Gaussian，熵近似为 -E[log_prob]。
+        通过单次采样估计。
+        
+        Args:
+            state: 当前状态向量
+        Returns:
+            entropy: 策略分布熵 (nats)
+        """
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            _, log_prob, _ = self.actor.sample(state_tensor)
+            # log_prob shape: (1, 1), entropy = -log_prob
+            entropy = -log_prob.mean().item()
+        return entropy

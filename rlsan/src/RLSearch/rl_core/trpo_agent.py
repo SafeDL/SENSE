@@ -187,19 +187,18 @@ class TRPOAgent(BaseRLAgent, ContinuousActionMixin):
                  min_batch_size: int = 1000,
                  device: str = 'cuda'):
         super().__init__()
-
+        
         self.state_dim = state_dim
         self._action_dim = action_dim
-        self.hidden_dims = hidden_dims  # ← 保存 hidden_dims
         self.gamma = gamma
         self.gae_lambda = gae_lambda
-
+        
         # TRPO Params
         self.max_kl = max_kl
         self.cg_damping = cg_damping
         self.cg_iters = cg_iters
         self.value_epochs = value_epochs
-
+        
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         
         # Networks
@@ -415,8 +414,7 @@ class TRPOAgent(BaseRLAgent, ContinuousActionMixin):
             'critic': self.critic.state_dict(),
             'config': {
                 'state_dim': self.state_dim,
-                'action_dim': self._action_dim,
-                'hidden_dims': self.hidden_dims
+                'action_dim': self._action_dim
             }
         }, path)
         print(f"[TRPO] Model saved to {path}")
@@ -425,12 +423,8 @@ class TRPOAgent(BaseRLAgent, ContinuousActionMixin):
     def load(cls, path: str, freeze: bool = True):
         checkpoint = torch.load(path, map_location='cpu')
         config = checkpoint.get('config', {})
-        agent = cls(
-            state_dim=config.get('state_dim', 25),
-            action_dim=config.get('action_dim', 4),
-            hidden_dims=config.get('hidden_dims', [128, 128, 64])  # ← 改成旧模型的架构
-        )
-
+        agent = cls(state_dim=config.get('state_dim', 25))
+        
         agent.actor.load_state_dict(checkpoint['actor'])
         agent.critic.load_state_dict(checkpoint['critic'])
             
@@ -440,3 +434,19 @@ class TRPOAgent(BaseRLAgent, ContinuousActionMixin):
             
         print(f"[TRPO] Loaded from {path}")
         return agent
+
+    def compute_policy_entropy(self, state: np.ndarray) -> float:
+        """
+        计算当前状态下策略分布的熵 (nats)。
+        TRPO 使用 Gaussian 分布，熵有解析解：H = sum_i(0.5 + 0.5*ln(2*pi*sigma_i^2))
+        
+        Args:
+            state: 当前状态向量
+        Returns:
+            entropy: 策略分布熵 (nats)
+        """
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            dist = self.actor(state_tensor)
+            entropy = dist.entropy().sum(dim=-1).mean().item()
+        return entropy

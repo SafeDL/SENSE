@@ -246,10 +246,9 @@ class PPOAgent(BaseRLAgent, ContinuousActionMixin):
                  device: str = 'cuda'):
         
         super().__init__()
-
+        
         self.state_dim = state_dim
         self._action_dim = 4  # w, c1, c2, velocity_scale
-        self.hidden_dims = hidden_dims  # ← 保存 hidden_dims
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_epsilon = clip_epsilon
@@ -258,7 +257,7 @@ class PPOAgent(BaseRLAgent, ContinuousActionMixin):
         self.max_grad_norm = max_grad_norm
         self.ppo_epochs = ppo_epochs
         self.mini_batch_size = mini_batch_size
-
+        
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         
         # 网络
@@ -457,7 +456,6 @@ class PPOAgent(BaseRLAgent, ContinuousActionMixin):
             'config': {
                 'state_dim': self.state_dim,
                 'action_dim': self._action_dim,
-                'hidden_dims': self.hidden_dims,
                 'gamma': self.gamma,
                 'clip_epsilon': self.clip_epsilon,
             }
@@ -468,13 +466,12 @@ class PPOAgent(BaseRLAgent, ContinuousActionMixin):
     def load(cls, path: str, freeze: bool = True) -> 'PPOAgent':
         """加载模型"""
         checkpoint = torch.load(path, map_location='cpu')
-
+        
         config = checkpoint.get('config', {})
         agent = cls(
             state_dim=config.get('state_dim', 25),
-            hidden_dims=config.get('hidden_dims', [128, 128, 64]),
         )
-
+        
         agent.network.load_state_dict(checkpoint['network'])
         if 'optimizer' in checkpoint:
             try:
@@ -498,6 +495,25 @@ class PPOAgent(BaseRLAgent, ContinuousActionMixin):
             'c2': float(action[2]),
             'velocity_scale': float(action[3]),
         }
+
+    def compute_policy_entropy(self, state: np.ndarray) -> float:
+        """
+        计算当前状态下策略分布的熵 (nats)。
+        PPO 使用 Gaussian 分布，熵有解析解：H = sum_i(0.5 + 0.5*ln(2*pi*sigma_i^2))
+        
+        Args:
+            state: 当前状态向量
+        Returns:
+            entropy: 策略分布熵 (nats)，值越大说明策略越随机/探索性越强
+        """
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            action_mean, _ = self.network.forward(state_tensor)
+            log_std = torch.clamp(self.network.log_std, self.network.log_std_min, self.network.log_std_max)
+            std = torch.exp(log_std)
+            dist = Normal(action_mean, std)
+            entropy = dist.entropy().sum(dim=-1).mean().item()
+        return entropy
 
 
 # ===== 测试代码 =====

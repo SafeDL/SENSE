@@ -64,6 +64,7 @@ venv.bak/
 # IDE files
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
@@ -90,8 +91,13 @@ venv.bak/
 # Ignore results and logs
 rlsan/results/
 log/
-logs/
 baselines/logs/
+rlsan/src/RLSearch/ad_search_results/
+rlsan/src/RLSearch/analysis/
+rlsan/src/RLSearch/results/
+rlsan/src/sampling/is_density_viz/
+original_safebench/
+
 
 # Note: The user requested "尽可能多的不超过100m的文件" (As many files <100MB as possible).
 # Since Git does not natively strictly filter by size in .gitignore,

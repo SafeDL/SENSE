@@ -112,7 +112,7 @@ def main():
     parser.add_argument('--grid_y', type=str,
                        default='/home/hp/SENSE/rlsan/src/surrogate/train_data/scenario01_grid_y.pkl',
                        help='Path to grid Y')
-    parser.add_argument('--output_dir', type=str, default='is_density_viz',
+    parser.add_argument('--output_dir', type=str, default='results/is_density_viz',
                        help='Output directory')
     args = parser.parse_args()
 

@@ -122,10 +122,9 @@ class TD3Agent(BaseRLAgent, ContinuousActionMixin):
                  policy_delay: int = 3,          # Tuned defaults
                  device: str = 'cuda'):
         super().__init__()
-
+        
         self.state_dim = state_dim
         self._action_dim = action_dim
-        self.hidden_dims = hidden_dims  # ← 保存 hidden_dims
         self.gamma = gamma
         self.tau = tau
         self.batch_size = batch_size
@@ -287,8 +286,7 @@ class TD3Agent(BaseRLAgent, ContinuousActionMixin):
             'critic': self.critic.state_dict(),
             'config': {
                 'state_dim': self.state_dim,
-                'action_dim': self._action_dim,
-                'hidden_dims': self.hidden_dims
+                'action_dim': self._action_dim
             }
         }, path)
         print(f"[TD3] Model saved to {path}")
@@ -297,12 +295,8 @@ class TD3Agent(BaseRLAgent, ContinuousActionMixin):
     def load(cls, path: str, freeze: bool = True):
         checkpoint = torch.load(path, map_location='cpu')
         config = checkpoint.get('config', {})
-        agent = cls(
-            state_dim=config.get('state_dim', 25),
-            action_dim=config.get('action_dim', 4),
-            hidden_dims=config.get('hidden_dims', [128, 128, 64])  # ← 改成旧模型的架构
-        )
-
+        agent = cls(state_dim=config.get('state_dim', 25))
+        
         agent.actor.load_state_dict(checkpoint['actor'])
         agent.critic.load_state_dict(checkpoint['critic'])
         agent.actor_target.load_state_dict(checkpoint['actor'])
@@ -314,3 +308,22 @@ class TD3Agent(BaseRLAgent, ContinuousActionMixin):
             
         print(f"[TD3] Loaded from {path}")
         return agent
+
+    def compute_policy_entropy(self, state: np.ndarray) -> float:
+        """
+        计算当前状态下策略分布的熵近似值 (nats)。
+        TD3 为确定性策略，将探索噪声 + 目标策略平滑噪声 (policy_noise)
+        综合建模为等效 Gaussian，计算解析熵。
+        取 exploration_noise 和 policy_noise 的均均值作为有效 sigma。
+        
+        Args:
+            state: 当前状态向量 (未使用，保持接口一致性)
+        Returns:
+            entropy: 策略分布熵近似值 (nats)
+        """
+        # TD3 两种噪声的有效标准差：取均就是计算总体不确定性
+        sigma = (self.exploration_noise + self.policy_noise) / 2.0
+        d = self._action_dim
+        import math
+        entropy = 0.5 * d * (1.0 + math.log(2.0 * math.pi * sigma ** 2 + 1e-8))
+        return entropy

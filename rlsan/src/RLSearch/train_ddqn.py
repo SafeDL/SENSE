@@ -1,14 +1,18 @@
 """
-train_ddqn.py - 状态感知RL-PSO训练脚本
+train_ddqn.py - Double DQN 训练脚本（多运行版）
 
 使用改进版组件：
 - StateAwareNichePSO: 状态感知小生境PSO
-- 8个简化动作
-- 20维状态特征
+- 离散动作空间
+- 状态感知特征
 - 聚类多样性奖励
 
 使用方法：
-    python train_ddqn.py --num_episodes 100
+    # 单次运行
+    python train_ddqn.py --num_episodes 100 --num_runs 1
+
+    # 多次独立实验 (RL标准做法: 3~5次)
+    python train_ddqn.py --num_episodes 100 --num_runs 5 --seeds 42 123 456 789 1024
 """
 
 import argparse
@@ -37,6 +41,7 @@ def train_one_episode(pso: StateAwareNichePSO,
     episode_losses = []
     episode_q_values = []
     episode_probs = [] # 记录所有步的所有动作概率 (n_steps, n_subgroups, n_actions)
+    episode_entropies = []   # 每步策略熵
     action_counts = np.zeros(6)  # 6个动作的计数
     
     for i in range(iterations_per_episode):
@@ -61,6 +66,18 @@ def train_one_episode(pso: StateAwareNichePSO,
                 current_step_probs.append(prob)
         
         episode_probs.append(current_step_probs)
+        
+        # 计算当前步策略熵：直接调用 pso._get_state()获取子群组状态
+        step_entropies = []
+        for idx in range(pso.num_subgroups):
+            try:
+                state = pso._get_state(idx)
+                ent = agent.compute_policy_entropy(state)
+                step_entropies.append(ent)
+            except Exception:
+                pass
+        if step_entropies:
+            episode_entropies.append(np.mean(step_entropies))
         
         # 实时刷新 Buffer
         if hasattr(pso, 'flush_experience_to_agent'):
@@ -111,6 +128,13 @@ def train_one_episode(pso: StateAwareNichePSO,
     # 计算动作分布（归一化）
     action_dist = action_counts / (action_counts.sum() + 1e-8)
     
+    # 计算最后20步的平均策略分布熵
+    window = 20
+    if episode_entropies:
+        avg_policy_entropy = float(np.mean(episode_entropies[-window:]))
+    else:
+        avg_policy_entropy = 0.0
+    
     return {
         'mean_reward': np.mean(episode_rewards) if episode_rewards else 0.0,
         'mean_loss': np.mean(episode_losses) if episode_losses else 0.0,
@@ -123,6 +147,7 @@ def train_one_episode(pso: StateAwareNichePSO,
         'episode_probs': episode_probs,
         'danger_found': danger_found,
         'num_danger_groups': num_danger_groups,
+        'avg_policy_entropy': avg_policy_entropy,   # 新增：最后20步平均策略熵
     }
 
 
@@ -248,20 +273,108 @@ def plot_training_curves(rewards: list, losses: list, q_values: list,
     print(f"Training curves saved to: {save_path}")
 
 
+def run_single_experiment(args, run_idx: int, seed: int) -> dict:
+    """运行一次完整的 DDQN 训练实验"""
+    print(f"\n{'#' * 60}\n# Run {run_idx + 1} | Seed: {seed}\n{'#' * 60}")
+    set_seed(seed)
+    exp_name = f"DDQN_ads_p{args.num_particles}_g{args.num_subgroups}_{seed}"
+    result_dir = os.path.join("results", exp_name)
+    os.makedirs(result_dir, exist_ok=True)
+    try:
+        from envs.ad_scenario_env import ADScenarioEnv
+        import gpytorch
+    except ImportError:
+        print("Error: ADS mode requires 'gpytorch'")
+        exit(1)
+    try:
+        gp_model, gp_likelihood = load_surrogate_model(args.model_path)
+    except Exception as e:
+        print(f"❌ Error: {e}, using dummy model")
+        gp_model, gp_likelihood = get_dummy_surrogate_model(args.dim)
+    env = ADScenarioEnv(gp_model=gp_model, gp_likelihood=gp_likelihood,
+                       dim=args.dim, bounds=tuple(args.bounds), runner=None)
+    state_dim = get_state_aware_state_dim()
+    action_dim = get_state_aware_action_dim()
+    agent = DoubleDQNAgent(
+        state_dim=state_dim, num_actions=action_dim, alpha=args.lr, gamma=args.gamma,
+        buffer_size=args.buffer_size, batch_size=args.batch_size,
+        epsilon=args.epsilon_start, min_epsilon=args.epsilon_end,
+        epsilon_decay=args.epsilon_decay, temperature=args.temperature
+    )
+    pso = StateAwareNichePSO(
+        env=env, agent=agent, num_particles=args.num_particles,
+        num_subgroups=args.num_subgroups, max_iterations=args.iterations_per_episode,
+        enable_restart=True, restart_patience=5, danger_threshold=args.danger_threshold,
+        task_type='ads', action_interval=args.action_interval,
+        action_smoothing_factor=args.action_smoothing,
+        reward_calculator_class=SafetyRewardCalculator, use_subgroup_features=True
+    )
+    all_rewards, all_losses, all_q_values = [], [], []
+    all_best_fitness, all_policy_entropies = [], []
+    start_time = time.time()
+    for episode in range(args.num_episodes):
+        if episode == 0:
+            pso.init_subgroups(reset_trackers=True)
+        result = train_one_episode(pso, env, agent, args.iterations_per_episode)
+        all_rewards.append(result['mean_reward'])
+        all_losses.append(result['mean_loss'])
+        all_q_values.append(result['mean_q_value'])
+        all_best_fitness.append(result['best_fitness'])
+        all_policy_entropies.append(result['avg_policy_entropy'])
+        window = min(20, len(all_rewards))
+        avg_reward = np.mean(all_rewards[-window:])
+        elapsed = time.time() - start_time
+        speed = (episode + 1) / elapsed
+        remaining = (args.num_episodes - episode - 1) / speed if speed > 0 else 0
+        danger_flag = "🚨" if result.get('danger_found', False) else "  "
+        danger_count = result.get('num_danger_groups', 0)
+        print(f"[Run {run_idx+1}] Ep {episode:3d}/{args.num_episodes} | "
+              f"R: {result['mean_reward']:.3f} | Avg: {avg_reward:.3f} | "
+              f"Fit: {result['best_fitness']:.4f} {danger_flag}({danger_count}) | "
+              f"Loss: {result['mean_loss']:.4f} | ETA: {remaining/60:.1f}m")
+        if episode > 0 and episode % 50 == 0:
+             agent.save(os.path.join(result_dir, f"ddqn_model_ep{episode}.pth"))
+    plot_path = os.path.join(result_dir, 'ddqn_training_curves.png')
+    # DDQN plot 仅需简化版本的绘图
+    plot_training_curves(all_rewards, all_losses, all_q_values, [], [], plot_path)
+    agent.save(os.path.join(result_dir, f"ddqn_model_final.pth"))
+    from scipy.io import savemat
+    mat_path = os.path.join(result_dir, 'ddqn_training_data.mat')
+    savemat(mat_path, {
+        'algorithm': 'DDQN', 'episodes': np.arange(1, len(all_rewards) + 1),
+        'mean_rewards': np.array(all_rewards), 'best_fitness': np.array(all_best_fitness),
+        'losses': np.array(all_losses), 'q_values': np.array(all_q_values),
+        'policy_dist_entropy': np.array(all_policy_entropies),
+    })
+    print(f"[Run {run_idx+1}] Training data saved to: {mat_path}")
+    print(f"\n[Run {run_idx+1}] Reward Calculator Statistics:")
+    pso.reward_calculator.print_stats()
+    compute_rl_metrics(all_rewards, [], pso)
+    run_time = time.time() - start_time
+    print(f"[Run {run_idx+1}] Time: {run_time/60:.1f}m | Final Avg Reward: {np.mean(all_rewards[-20:]):.4f}")
+    if all_policy_entropies:
+        print(f"[Run {run_idx+1}] Final Avg Policy Entropy (last 20): {np.mean(all_policy_entropies[-20:]):.4f} nats")
+    return {
+        'seed': seed, 'rewards': np.array(all_rewards), 'losses': np.array(all_losses),
+        'q_values': np.array(all_q_values), 'best_fitness': np.array(all_best_fitness),
+        'policy_entropies': np.array(all_policy_entropies), 'run_time': run_time,
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description='RL-PSO Training')
+    parser = argparse.ArgumentParser(description='DDQN RL-PSO Training (Multi-Run)')
     
     # 训练参数
     parser.add_argument('--num_episodes', type=int, default=500)
     parser.add_argument('--iterations_per_episode', type=int, default=200)
-    parser.add_argument('--seed', type=int, default=42)
-    
+    parser.add_argument('--seed', type=int, default=42, help='单次运行的种子 (仅 num_runs=1 时使用)')
+
     # PSO参数
     parser.add_argument('--num_particles', type=int, default=500)
     parser.add_argument('--num_subgroups', type=int, default=5)
-    parser.add_argument('--dim', type=int, default=3)  # 与ADS部署一致 (surrogate model trained on 3 dims)
-    parser.add_argument('--bounds', type=float, nargs=2, default=[-1, 1])  # 统一为[-1, 1]与ADS部署一致
-    
+    parser.add_argument('--dim', type=int, default=3)
+    parser.add_argument('--bounds', type=float, nargs=2, default=[-1, 1])
+
     # DQN参数
     parser.add_argument('--lr', type=float, default=3e-5)
     parser.add_argument('--gamma', type=float, default=0.7)
@@ -272,206 +385,110 @@ def main():
     parser.add_argument('--epsilon_decay', type=float, default=0.995)
     parser.add_argument('--temperature', type=float, default=2.0,
                         help='Software exploration temperature')
-    
+
     # ADS params
-    parser.add_argument('--danger_threshold', type=float, default=-0.3, 
+    parser.add_argument('--danger_threshold', type=float, default=-0.3,
                         help='Threshold for niche discovery')
     parser.add_argument('--model_path', type=str, default='../../results/s1exp/surrogate_model.pkl',
                         help='Path to surrogate model')
 
-    # 策略执行区间与平滑 (Scheme A & B)
+    # 策略执行区间与平滑
     parser.add_argument('--action_interval', type=int, default=10,
                         help='Number of steps to hold the same action (Frame Skipping)')
     parser.add_argument('--action_smoothing', type=float, default=0.6,
                         help='Smoothing factor (alpha) for parameter updates')
-    
+
+    # ===== 多次独立实验参数 =====
+    parser.add_argument('--num_runs', type=int, default=5,
+                        help='独立实验次数 (默认5次, RL论文标准: 3~5次)')
+    parser.add_argument('--seeds', type=int, nargs='+',
+                        default=[42, 123, 456, 789, 1024],
+                        help='每次实验的随机种子列表')
+
     args = parser.parse_args()
-    
-    print("=" * 60)
-    print("State-Aware RL-PSO Training")
-    print("=" * 60)
-    
-    # 获取维度
-    state_dim = get_state_aware_state_dim()
-    action_dim = get_state_aware_action_dim()
-    
-    print(f"✅ 使用状态感知框架")
-    print(f"   State dim: {state_dim} ")
-    print(f"   Action dim: {action_dim}")
-    print(f"Episodes: {args.num_episodes}, Iterations: {args.iterations_per_episode}")
-    print(f"Particles: {args.num_particles}, Subgroups: {args.num_subgroups}")
-    print("=" * 60)
-    
-    # 路径设置
-    exp_name = f"DDQN_ads_p{args.num_particles}_g{args.num_subgroups}_{args.seed}"
-    result_dir = os.path.join("results", exp_name)
-    os.makedirs(result_dir, exist_ok=True)
-    
-    set_seed(args.seed)
-    
-    # 环境创建 (仅支持 ADS 自动驾驶场景)
-    try:
-        from envs.ad_scenario_env import ADScenarioEnv
-        import gpytorch
-    except ImportError:
-        print("Error: ADS mode requires 'gpytorch'. Please install it.")
-        exit(1)
-        
-    print(f"\n🚗 ADS测试场景训练模式")
-    print(f"   Model Path: {args.model_path}")
-    
-    # 加载真实代理模型
-    try:
-         gp_model, gp_likelihood = load_surrogate_model(args.model_path)
-         print("✅ Surrogate model loaded successfully.")
-    except Exception as e:
-          print(f"❌ Error loading surrogate model: {e}")
-          print("   Falling back to Dummy GP Model for demonstration ONLY.")
-          gp_model, gp_likelihood = get_dummy_surrogate_model(args.dim)
 
-    env = ADScenarioEnv(
-        gp_model=gp_model,
-        gp_likelihood=gp_likelihood,
-        dim=args.dim,
-        bounds=tuple(args.bounds),
-        runner=None
-    )
-    print(f"   ADS Environment Initialized (Surrogate Only)")
+    # 确保种子列表长度 >= num_runs
+    if len(args.seeds) < args.num_runs:
+        extra_seeds = [args.seeds[-1] + i * 111 for i in range(1, args.num_runs - len(args.seeds) + 1)]
+        args.seeds = args.seeds + extra_seeds
+    args.seeds = args.seeds[:args.num_runs]
+    
+    print("=" * 60)
+    print("DDQN RL-PSO Training (Multi-Run)")
+    print("=" * 60)
+    print(f"  独立实验次数 (num_runs): {args.num_runs}")
+    print(f"  随机种子列表: {args.seeds}")
+    print(f"  每次实验 Episodes: {args.num_episodes}")
+    print("=" * 60)
 
-    # 创建Agent（使用更小的网络因为状态/动作都更小）
-    agent = DoubleDQNAgent(
-        state_dim=state_dim,
-        num_actions=action_dim,
-        alpha=args.lr,
-        gamma=args.gamma,
-        buffer_size=args.buffer_size,
-        batch_size=args.batch_size,
-        epsilon=args.epsilon_start,
-        min_epsilon=args.epsilon_end,
-        epsilon_decay=args.epsilon_decay,
-        temperature=args.temperature,
-        hidden_dims=[128, 128, 64]  # 网络需要3层隐藏层
-    )
-    
-    # 创建PSO
-    pso = StateAwareNichePSO(
-        env=env,
-        agent=agent,
-        num_particles=args.num_particles,
-        num_subgroups=args.num_subgroups,
-        max_iterations=args.iterations_per_episode,
-        enable_restart=True,
-        restart_patience=5,
-        danger_threshold=args.danger_threshold,
-        task_type='ads',
-        action_interval=args.action_interval,
-        action_smoothing_factor=args.action_smoothing,
-        reward_calculator_class=SafetyRewardCalculator,
-        use_subgroup_features=True
-    )
-    
-    # 训练
-    all_rewards = []
-    all_losses = []
-    all_q_values = []
-    all_action_dists = []
-    all_prob_history = [] # 全局动作概率历史
-    func_stats = {}
-    
-    start_time = time.time()
-    
-    print(f"\n✅ ADS场景训练: 代理模型辅助环境")
-    print(f"   目标: 在 {args.dim} 维参数空间中搜索高风险场景\n")
-    
-    for episode in range(args.num_episodes):
-        func_name = env.get_current_function_name()
-        
-        # 训练（首轮完整初始化）
-        if episode == 0:
-            pso.init_subgroups(reset_trackers=True)
-        
-        result = train_one_episode(
-            pso, env, agent, args.iterations_per_episode
-        )
-        
-        all_rewards.append(result['mean_reward'])
-        all_losses.append(result['mean_loss'])
-        all_q_values.append(result['mean_q_value'])
-        all_action_dists.append(result['action_dist'])
-        all_prob_history.extend(result['episode_probs']) # 展平为步的列表
-        
-        # 更新函数统计
-        if func_name not in func_stats:
-            func_stats[func_name] = {'count': 0, 'total_reward': 0, 'best_fitness': float('inf')}
-        func_stats[func_name]['count'] += 1
-        func_stats[func_name]['total_reward'] += result['mean_reward']
-        func_stats[func_name]['best_fitness'] = min(
-            func_stats[func_name]['best_fitness'], result['best_fitness']
-        )
-        
-        # 计算滑动平均
-        window = min(20, len(all_rewards))
-        avg_reward = np.mean(all_rewards[-window:])
-        
-        # 计算速度
-        elapsed = time.time() - start_time
-        speed = (episode + 1) / elapsed
-        remaining = (args.num_episodes - episode - 1) / speed if speed > 0 else 0
-        
-        # 温度衰减 (每 Episode)
-        agent.temperature = max(0.5, agent.temperature * args.epsilon_decay)
-        
-        # 显示进度
-        progress = episode / args.num_episodes
-        phase = "📘" if progress < 0.3 else ("📗" if progress < 0.7 else "📙")
-            
-        act_dist_pct = (result['action_dist'] * 100).astype(int)
-        
-        # 危险场景标志
-        danger_flag = "🚨" if result.get('danger_found', False) else "  "
-        danger_count = result.get('num_danger_groups', 0)
-        
-        print(f"{phase} Ep {episode:3d}/{args.num_episodes} | "
-              f"Func: {func_name:<15} | "
-              f"R: {result['mean_reward']:7.3f} | "
-              f"Avg: {avg_reward:7.3f} | "
-              f"Fit: {result['best_fitness']:.4f} {danger_flag}({danger_count}) | "
-              f"Niches: {result['num_niches']:2d} | "
-              f"T: {agent.temperature:.3f} | "
-              f"Acts: {act_dist_pct}% | "
-              f"ETA: {remaining/60:.1f}m")
-              
-        if episode > 0 and episode % 50 == 0:
-             agent.save(os.path.join(result_dir, f"ddqn_model_ep{episode}.pth"))
-    
-    # 保存模型 (带类别标识)
-    save_path = os.path.join(result_dir, 'ddqn_model_final.pth')
-    plot_path = os.path.join(result_dir, 'ddqn_training_curves.png')
-    
-    agent.save(save_path)
-    print(f"\nModel saved to: {save_path}")
-    
-    # 绘制曲线（新指标：Q-value 和 Action Distribution）
-    plot_training_curves(all_rewards, all_losses, all_q_values, 
-                         all_action_dists, all_prob_history, plot_path)
-    
+    all_run_results = []
+    total_start = time.time()
+
+    for run_idx in range(args.num_runs):
+        seed = args.seeds[run_idx]
+        result = run_single_experiment(args, run_idx, seed)
+        all_run_results.append(result)
+        print(f"\n✅ Run {run_idx + 1}/{args.num_runs} 完成 (seed={seed})")
+
+    total_time = time.time() - total_start
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    matlab_dir = os.path.normpath(os.path.join(script_dir, '..', '..', '..', 'matlab_scripts'))
+    os.makedirs(matlab_dir, exist_ok=True)
+
+    num_eps = args.num_episodes
+    num_runs = args.num_runs
+
+    mat_rewards = np.zeros((num_runs, num_eps))
+    mat_best_fitness = np.zeros((num_runs, num_eps))
+    mat_losses = np.zeros((num_runs, num_eps))
+    mat_q_values = np.zeros((num_runs, num_eps))
+    mat_policy_entropies = np.zeros((num_runs, num_eps))
+
+    for i, res in enumerate(all_run_results):
+        n = min(len(res['rewards']), num_eps)
+        mat_rewards[i, :n] = res['rewards'][:n]
+        mat_best_fitness[i, :n] = res['best_fitness'][:n]
+        mat_losses[i, :n] = res['losses'][:n]
+        mat_q_values[i, :n] = res['q_values'][:n]
+        mat_policy_entropies[i, :n] = res['policy_entropies'][:n]
+
+    from scipy.io import savemat
+    multi_run_mat_path = os.path.join(matlab_dir, 'ddqn_multi_run_data.mat')
+    savemat(multi_run_mat_path, {
+        'algorithm': 'DDQN', 'num_runs': num_runs, 'num_episodes': num_eps,
+        'seeds': np.array(args.seeds), 'episodes': np.arange(1, num_eps + 1),
+        'all_rewards': mat_rewards, 'all_best_fitness': mat_best_fitness,
+        'all_losses': mat_losses, 'all_q_values': mat_q_values,
+        'all_policy_entropies': mat_policy_entropies,
+        'mean_rewards': np.mean(mat_rewards, axis=0), 'std_rewards': np.std(mat_rewards, axis=0),
+        'mean_best_fitness': np.mean(mat_best_fitness, axis=0), 'std_best_fitness': np.std(mat_best_fitness, axis=0),
+    })
+    print(f"\n📊 汇总数据已保存到: {multi_run_mat_path}")
+
+    for i, res in enumerate(all_run_results):
+        run_mat_path = os.path.join(matlab_dir, f'ddqn_run_{i+1}.mat')
+        savemat(run_mat_path, {
+            'algorithm': 'DDQN', 'seed': res['seed'],
+            'episodes': np.arange(1, len(res['rewards']) + 1),
+            'mean_rewards': res['rewards'], 'best_fitness': res['best_fitness'],
+            'losses': res['losses'], 'q_values': res['q_values'],
+            'policy_dist_entropy': res['policy_entropies'],
+        })
+    print(f"📊 各 run 独立数据已保存: ddqn_run_1.mat ~ ddqn_run_{num_runs}.mat")
+
     print("\n" + "=" * 60)
-    print("Training Complete!")
-    print(f"Total time: {(time.time() - start_time)/60:.1f} minutes")
-    print(f"Final Avg Reward (last 20): {np.mean(all_rewards[-20:]):.4f}")
-    
-    print("\n📊 Function Training Statistics:")
-    print("-" * 50)
-    sorted_funcs = sorted(func_stats.items(), key=lambda x: x[1]['count'], reverse=True)
-    for func_name, stats in sorted_funcs:
-        avg_reward = stats['total_reward'] / stats['count']
-        print(f"  {func_name:<20} | count: {stats['count']:3d} | avg_reward: {avg_reward:7.3f}")
-    print("-" * 50)
-    print(f"Total functions used: {len(func_stats)}")
+    print("🏁 Multi-Run Training Complete!")
+    print("=" * 60)
+    print(f"  总运行次数: {num_runs}")
+    print(f"  总耗时: {total_time/60:.1f} min")
 
-    # 评测并输出比较指标
-    compute_rl_metrics(all_rewards, all_action_dists, pso)
-
+    final_rewards = [np.mean(res['rewards'][-20:]) for res in all_run_results]
+    print(f"  最终平均奖励 (last 20 eps):")
+    for i, (seed, fr) in enumerate(zip(args.seeds, final_rewards)):
+        print(f"    Run {i+1} (seed={seed}): {fr:.4f}")
+    print(f"  跨 Run 均值 ± 标准差: {np.mean(final_rewards):.4f} ± {np.std(final_rewards):.4f}")
+    print(f"\n  汇总文件: {multi_run_mat_path}")
     print("=" * 60)
 
 

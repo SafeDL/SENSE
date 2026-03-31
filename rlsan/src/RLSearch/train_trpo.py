@@ -1,12 +1,15 @@
 """
-train_trpo.py - TRPO专用训练脚本
+train_trpo.py - TRPO专用训练脚本（多运行版）
 
 基于 train_ppo.py 改造的 On-Policy 测试基准。
-用于运行 TRPOAgent。
+支持多次独立实验、输出平均指标±标准差。
 
 使用方法：
-    python train_trpo.py --num_episodes 200
-    python train_trpo.py --mode ads_test --model_path ../../results/s1exp/surrogate_model.pkl
+    # 单次运行
+    python train_trpo.py --num_episodes 200 --num_runs 1
+
+    # 多次独立实验 (RL标准做法: 3~5次)
+    python train_trpo.py --num_episodes 200 --num_runs 5 --seeds 42 123 456 789 1024
 """
 
 import argparse
@@ -26,10 +29,6 @@ from optimizer.reward import SafetyRewardCalculator
 from utils import set_seed, load_surrogate_model, get_dummy_surrogate_model, compute_rl_metrics
 
 
-
-
-
-
 def train_one_episode(pso: StateAwareNichePSO,
                       env,
                       agent: TRPOAgent,
@@ -38,6 +37,7 @@ def train_one_episode(pso: StateAwareNichePSO,
     
     episode_rewards = []
     episode_actions = []
+    episode_entropies = []  # 每步策略熵
     
     for i in range(iterations_per_episode):
         # PSO迭代
@@ -52,6 +52,18 @@ def train_one_episode(pso: StateAwareNichePSO,
                     episode_actions.append(act.copy())
                 elif isinstance(act, (list, tuple)):
                     episode_actions.append(np.array(act))
+        
+        # 计算当前步策略熵：直接调用 pso._get_state()获取子群组状态
+        step_entropies = []
+        for idx in range(pso.num_subgroups):
+            try:
+                state = pso._get_state(idx)
+                ent = agent.compute_policy_entropy(state)
+                step_entropies.append(ent)
+            except Exception:
+                pass
+        if step_entropies:
+            episode_entropies.append(np.mean(step_entropies))
     
     # 刷新所有并行的轨迹缓存，并标记为Done
     if hasattr(pso, 'flush_experience_to_agent'):
@@ -76,11 +88,18 @@ def train_one_episode(pso: StateAwareNichePSO,
     # 获取奖励计算器统计
     reward_stats = pso.reward_calculator.get_stats()
     
-    # 计算连续动作参数的均值
+    # 计算连续动作参数的均値
     if episode_actions:
         action_means = np.mean(episode_actions, axis=0)
     else:
         action_means = np.zeros(4)
+    
+    # 计算最后20步的平均策略分布熵
+    window = 20
+    if episode_entropies:
+        avg_policy_entropy = float(np.mean(episode_entropies[-window:]))
+    else:
+        avg_policy_entropy = 0.0
     
     return {
         'mean_reward': np.mean(episode_rewards) if episode_rewards else 0.0,
@@ -96,6 +115,7 @@ def train_one_episode(pso: StateAwareNichePSO,
         'best_fitness_ever': reward_stats.get('best_fitness', float('inf')),
         'danger_found': danger_found,
         'num_danger_groups': num_danger_groups,
+        'avg_policy_entropy': avg_policy_entropy,   # 新增：最后20步平均策略熵
     }
 
 
@@ -193,20 +213,120 @@ def plot_training_curves(rewards: list, policy_losses: list, value_losses: list,
     print(f"Training curves saved to: {save_path}")
 
 
+def run_single_experiment(args, run_idx: int, seed: int) -> dict:
+    """运行一次完整的 TRPO 训练实验"""
+    print(f"\n{'#' * 60}\n# Run {run_idx + 1} | Seed: {seed}\n{'#' * 60}")
+    set_seed(seed)
+    exp_name = f"TRPO_ads_p{args.num_particles}_g{args.num_subgroups}_{seed}"
+    result_dir = os.path.join("results", exp_name)
+    os.makedirs(result_dir, exist_ok=True)
+    try:
+        from envs.ad_scenario_env import ADScenarioEnv
+        import gpytorch
+    except ImportError:
+        print("Error: ADS mode requires 'gpytorch'")
+        exit(1)
+    try:
+        gp_model, gp_likelihood = load_surrogate_model(args.model_path)
+    except Exception as e:
+        print(f"❌ Error: {e}, using dummy model")
+        gp_model, gp_likelihood = get_dummy_surrogate_model(args.dim)
+    env = ADScenarioEnv(gp_model=gp_model, gp_likelihood=gp_likelihood,
+                       dim=args.dim, bounds=tuple(args.bounds), runner=None)
+    state_dim = get_state_aware_state_dim()
+    agent = TRPOAgent(
+        state_dim=state_dim, action_dim=4, gamma=args.gamma, gae_lambda=args.gae_lambda,
+        max_kl=args.max_kl, cg_damping=args.cg_damping, cg_iters=args.cg_iters,
+        value_lr=args.value_lr, value_epochs=args.value_epochs,
+        min_batch_size=args.min_batch_size, hidden_dims=[128, 128, 64]
+    )
+    pso = StateAwareNichePSO(
+        env=env, agent=agent, num_particles=args.num_particles,
+        num_subgroups=args.num_subgroups, max_iterations=args.iterations_per_episode,
+        enable_restart=True, restart_patience=5, danger_threshold=args.danger_threshold,
+        task_type='ads', action_interval=args.action_interval,
+        action_smoothing_factor=args.action_smoothing,
+        reward_calculator_class=SafetyRewardCalculator, use_subgroup_features=True
+    )
+    all_rewards, all_policy_losses, all_value_losses, all_kl_divs = [], [], [], []
+    all_action_means, all_best_fitness, all_policy_entropies = [], [], []
+    start_time = time.time()
+    for episode in range(args.num_episodes):
+        if episode == 0:
+            pso.init_subgroups(reset_trackers=True)
+        result = train_one_episode(pso, env, agent, args.iterations_per_episode)
+        all_rewards.append(result['mean_reward'])
+        all_policy_losses.append(result['policy_loss'])
+        all_value_losses.append(result['value_loss'])
+        all_kl_divs.append(result['kl_divergence'])
+        all_action_means.append(result['action_means'])
+        all_best_fitness.append(result['best_fitness'])
+        all_policy_entropies.append(result['avg_policy_entropy'])
+        window = min(20, len(all_rewards))
+        avg_reward = np.mean(all_rewards[-window:])
+        elapsed = time.time() - start_time
+        speed = (episode + 1) / elapsed
+        remaining = (args.num_episodes - episode - 1) / speed if speed > 0 else 0
+        am = result['action_means']
+        action_str = f"w:{am[0]:.2f} c1:{am[1]:.2f} c2:{am[2]:.2f} vs:{am[3]:.2f}"
+        danger_flag = "🚨" if result.get('danger_found', False) else "  "
+        danger_count = result.get('num_danger_groups', 0)
+        print(f"[Run {run_idx+1}] Ep {episode:3d}/{args.num_episodes} | "
+              f"R: {result['mean_reward']:.3f} | Avg: {avg_reward:.3f} | "
+              f"Fit: {result['best_fitness']:.4f} {danger_flag}({danger_count}) | "
+              f"KL: {result['kl_divergence']:.4f} | {action_str} | ETA: {remaining/60:.1f}m")
+        if episode > 0 and episode % 50 == 0:
+             agent.save(os.path.join(result_dir, f"trpo_model_ep{episode}.pth"))
+    plot_path = os.path.join(result_dir, 'trpo_training_curves.png')
+    plot_training_curves(all_rewards, all_policy_losses, all_value_losses,
+                         all_kl_divs, all_action_means, plot_path)
+    agent.save(os.path.join(result_dir, f"trpo_model_final.pth"))
+    action_array = np.array(all_action_means)
+    mat_path = os.path.join(result_dir, 'trpo_training_data.mat')
+    savemat(mat_path, {
+        'algorithm': 'TRPO', 'episodes': np.arange(1, len(all_rewards) + 1),
+        'mean_rewards': np.array(all_rewards), 'best_fitness': np.array(all_best_fitness),
+        'policy_losses': np.array(all_policy_losses), 'value_losses': np.array(all_value_losses),
+        'kl_divergences': np.array(all_kl_divs), 'policy_dist_entropy': np.array(all_policy_entropies),
+        'action_w': action_array[:, 0] if len(action_array) > 0 else np.array([]),
+        'action_c1': action_array[:, 1] if len(action_array) > 0 else np.array([]),
+        'action_c2': action_array[:, 2] if len(action_array) > 0 else np.array([]),
+        'action_vs': action_array[:, 3] if len(action_array) > 0 else np.array([]),
+    })
+    print(f"[Run {run_idx+1}] Training data saved to: {mat_path}")
+    print(f"\n[Run {run_idx+1}] Reward Calculator Statistics:")
+    pso.reward_calculator.print_stats()
+    compute_rl_metrics(all_rewards, all_action_means, pso)
+    run_time = time.time() - start_time
+    print(f"[Run {run_idx+1}] Time: {run_time/60:.1f}m | Final Avg Reward: {np.mean(all_rewards[-20:]):.4f}")
+    if all_policy_entropies:
+        print(f"[Run {run_idx+1}] Final Avg Policy Entropy (last 20): {np.mean(all_policy_entropies[-20:]):.4f} nats")
+    return {
+        'seed': seed, 'rewards': np.array(all_rewards), 'policy_losses': np.array(all_policy_losses),
+        'value_losses': np.array(all_value_losses), 'best_fitness': np.array(all_best_fitness),
+        'policy_entropies': np.array(all_policy_entropies),
+        'action_w': action_array[:, 0] if len(action_array) > 0 else np.array([]),
+        'action_c1': action_array[:, 1] if len(action_array) > 0 else np.array([]),
+        'action_c2': action_array[:, 2] if len(action_array) > 0 else np.array([]),
+        'action_vs': action_array[:, 3] if len(action_array) > 0 else np.array([]),
+        'run_time': run_time,
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description='TRPO RL-PSO Training')
+    parser = argparse.ArgumentParser(description='TRPO RL-PSO Training (Multi-Run)')
     
     # 训练参数
     parser.add_argument('--num_episodes', type=int, default=500)
     parser.add_argument('--iterations_per_episode', type=int, default=200)
-    parser.add_argument('--seed', type=int, default=42)
-    
+    parser.add_argument('--seed', type=int, default=42, help='单次运行的种子 (仅 num_runs=1 时使用)')
+
     # PSO参数
     parser.add_argument('--num_particles', type=int, default=500)
     parser.add_argument('--num_subgroups', type=int, default=10)
     parser.add_argument('--dim', type=int, default=3)
     parser.add_argument('--bounds', type=float, nargs=2, default=[-1, 1])
-    
+
     # TRPO参数
     parser.add_argument('--value_lr', type=float, default=3e-4)
     parser.add_argument('--gamma', type=float, default=0.7)
@@ -218,187 +338,118 @@ def main():
     parser.add_argument('--min_batch_size', type=int, default=1000)
 
     parser.add_argument('--danger_threshold', type=float, default=-0.3, help='Threshold for niche discovery')
-    
+
     # ADS params
     parser.add_argument('--model_path', type=str, default='../../results/s1exp/surrogate_model.pkl')
-    
+
     # 策略执行区间
     parser.add_argument('--action_interval', type=int, default=10)
     parser.add_argument('--action_smoothing', type=float, default=0.6)
-    
+
+    # ===== 多次独立实验参数 =====
+    parser.add_argument('--num_runs', type=int, default=5,
+                        help='独立实验次数 (默认5次, RL论文标准: 3~5次)')
+    parser.add_argument('--seeds', type=int, nargs='+',
+                        default=[42, 123, 456, 789, 1024],
+                        help='每次实验的随机种子列表')
+
     args = parser.parse_args()
+
+    # 确保种子列表长度 >= num_runs
+    if len(args.seeds) < args.num_runs:
+        extra_seeds = [args.seeds[-1] + i * 111 for i in range(1, args.num_runs - len(args.seeds) + 1)]
+        args.seeds = args.seeds + extra_seeds
+    args.seeds = args.seeds[:args.num_runs]
     
     print("=" * 60)
-    print("TRPO RL-PSO Training Base Script")
+    print("TRPO RL-PSO Training (Multi-Run)")
     print("=" * 60)
-    print("Key Improvements:")
-    print("  ✓ Strict KL Divergence Constraints")
-    print("  ✓ Trust Region Policy Optimization via Fisher Vector Products")
+    print(f"  独立实验次数 (num_runs): {args.num_runs}")
+    print(f"  随机种子列表: {args.seeds}")
+    print(f"  每次实验 Episodes: {args.num_episodes}")
     print("=" * 60)
-    
-    # 获取PPO专用状态维度（28维，包含子种群感知特征）
-    state_dim = get_state_aware_state_dim()
-    action_dim = 4
-    
-    print(f"✅ 使用 TRPO 连续动作算法")
-    print(f"   State dim: {state_dim} (25 base + 3 subgroup-aware)")
-    print(f"   Action dim: {action_dim} (w, c1, c2, velocity_scale)")
-    print(f"   Max KL constraint: {args.max_kl}")
-    print(f"   Episodes: {args.num_episodes}, Iterations: {args.iterations_per_episode}")
-    print("=" * 60)
-    
-    # 路径设置
-    exp_name = f"TRPO_ads_p{args.num_particles}_g{args.num_subgroups}_{args.seed}"
-    result_dir = os.path.join("results", exp_name)
-    os.makedirs(result_dir, exist_ok=True)
-    
-    set_seed(args.seed)
-    
-    # 创建环境 (仅支持 ADS 自动驾驶场景)
-    try:
-        from envs.ad_scenario_env import ADScenarioEnv
-        import gpytorch
-    except ImportError:
-        print("Error: ADS mode requires 'gpytorch'")
-        exit(1)
-    
-    print(f"\n🚗 ADS测试场景训练模式")
-    try:
-        gp_model, gp_likelihood = load_surrogate_model(args.model_path)
-        print("✅ Surrogate model loaded")
-    except Exception as e:
-        print(f"❌ Error: {e}, using dummy model")
-        gp_model, gp_likelihood = get_dummy_surrogate_model(args.dim)
-    
-    env = ADScenarioEnv(gp_model=gp_model, gp_likelihood=gp_likelihood,
-                       dim=args.dim, bounds=tuple(args.bounds), runner=None)
-    
-    # 创建连续动作TRPO Agent
-    agent = TRPOAgent(
-        state_dim=state_dim,
-        action_dim=action_dim,
-        gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        max_kl=args.max_kl,
-        cg_damping=args.cg_damping,
-        cg_iters=args.cg_iters,
-        value_lr=args.value_lr,
-        value_epochs=args.value_epochs,
-        min_batch_size=args.min_batch_size,
-        hidden_dims=[128, 128, 64]
-    )
-    print(f"   Agent: TRPOAgent")
-    
-    # 创建TRPO专用PSO (与PPO逻辑相同)
-    pso = StateAwareNichePSO(
-        env=env, agent=agent,
-        num_particles=args.num_particles,
-        num_subgroups=args.num_subgroups,
-        max_iterations=args.iterations_per_episode,
-        enable_restart=True,
-        restart_patience=5,
-        danger_threshold=args.danger_threshold,
-        task_type='ads',
-        action_interval=args.action_interval,
-        action_smoothing_factor=args.action_smoothing,
-        reward_calculator_class=SafetyRewardCalculator,
-        use_subgroup_features=True
-    )
-    
-    # 训练
-    all_rewards, all_policy_losses, all_value_losses, all_kl_divs = [], [], [], []
-    all_action_means = []
-    all_best_fitness = []
-    func_stats = {}
-    
-    start_time = time.time()
-    
-    for episode in range(args.num_episodes):
-        func_name = env.get_current_function_name()
-        
-        if episode == 0:
-            pso.init_subgroups(reset_trackers=True)
-        
-        result = train_one_episode(pso, env, agent, args.iterations_per_episode)
-        
-        all_rewards.append(result['mean_reward'])
-        all_policy_losses.append(result['policy_loss'])
-        all_value_losses.append(result['value_loss'])
-        all_kl_divs.append(result['kl_divergence'])
-        all_action_means.append(result['action_means'])
-        all_best_fitness.append(result['best_fitness'])
-        
-        # 统计
-        if func_name not in func_stats:
-            func_stats[func_name] = {'count': 0, 'total_reward': 0, 'best_fitness': float('inf')}
-        func_stats[func_name]['count'] += 1
-        func_stats[func_name]['total_reward'] += result['mean_reward']
-        func_stats[func_name]['best_fitness'] = min(func_stats[func_name]['best_fitness'], result['best_fitness'])
-        
-        # 进度
-        window = min(20, len(all_rewards))
-        avg_reward = np.mean(all_rewards[-window:])
-        elapsed = time.time() - start_time
-        speed = (episode + 1) / elapsed
-        remaining = (args.num_episodes - episode - 1) / speed if speed > 0 else 0
-        
-        # 动作参数显示
-        am = result['action_means']
-        action_str = f"w:{am[0]:.2f} c1:{am[1]:.2f} c2:{am[2]:.2f} vs:{am[3]:.2f}"
-        
-        # 危险场景标志
-        danger_flag = "🚨" if result.get('danger_found', False) else "  "
-        danger_count = result.get('num_danger_groups', 0)
-        best_fit = result['best_fitness']
-        
-        print(f"Ep {episode:3d}/{args.num_episodes} | {func_name:<15} | "
-              f"R: {result['mean_reward']:.3f} | Avg: {avg_reward:.3f} | "
-              f"Fit: {best_fit:.4f} {danger_flag}({danger_count}) | "
-              f"KL: {result['kl_divergence']:.4f} | "
-              f"{action_str} | ETA: {remaining/60:.1f}m")
-              
-        if episode > 0 and episode % 50 == 0:
-             agent.save(os.path.join(result_dir, f"trpo_model_ep{episode}.pth"))
-    
-    # 保存
-    save_path = os.path.join(result_dir, 'trpo_model_final.pth')
-    plot_path = os.path.join(result_dir, 'trpo_training_curves.png')
-    
-    agent.save(save_path)
-    plot_training_curves(all_rewards, all_policy_losses, all_value_losses,
-                         all_kl_divs, all_action_means, plot_path)
-    
-    # 导出训练数据为 .mat 格式（供 MATLAB 对比可视化）
-    action_array = np.array(all_action_means)
-    mat_path = os.path.join(result_dir, 'trpo_training_data.mat')
-    savemat(mat_path, {
-        'algorithm': 'TRPO',
-        'episodes': np.arange(1, len(all_rewards) + 1),
-        'mean_rewards': np.array(all_rewards),
-        'best_fitness': np.array(all_best_fitness),
-        'policy_losses': np.array(all_policy_losses),
-        'value_losses': np.array(all_value_losses),
-        'kl_divergences': np.array(all_kl_divs),
-        'action_w': action_array[:, 0] if len(action_array) > 0 else np.array([]),
-        'action_c1': action_array[:, 1] if len(action_array) > 0 else np.array([]),
-        'action_c2': action_array[:, 2] if len(action_array) > 0 else np.array([]),
-        'action_vs': action_array[:, 3] if len(action_array) > 0 else np.array([]),
+
+    all_run_results = []
+    total_start = time.time()
+
+    for run_idx in range(args.num_runs):
+        seed = args.seeds[run_idx]
+        result = run_single_experiment(args, run_idx, seed)
+        all_run_results.append(result)
+        print(f"\n✅ Run {run_idx + 1}/{args.num_runs} 完成 (seed={seed})")
+
+    total_time = time.time() - total_start
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    matlab_dir = os.path.normpath(os.path.join(script_dir, '..', '..', '..', 'matlab_scripts'))
+    os.makedirs(matlab_dir, exist_ok=True)
+
+    num_eps = args.num_episodes
+    num_runs = args.num_runs
+
+    mat_rewards = np.zeros((num_runs, num_eps))
+    mat_action_w = np.zeros((num_runs, num_eps))
+    mat_action_c1 = np.zeros((num_runs, num_eps))
+    mat_action_c2 = np.zeros((num_runs, num_eps))
+    mat_action_vs = np.zeros((num_runs, num_eps))
+    mat_best_fitness = np.zeros((num_runs, num_eps))
+    mat_policy_losses = np.zeros((num_runs, num_eps))
+    mat_value_losses = np.zeros((num_runs, num_eps))
+    mat_policy_entropies = np.zeros((num_runs, num_eps))
+
+    for i, res in enumerate(all_run_results):
+        n = min(len(res['rewards']), num_eps)
+        mat_rewards[i, :n] = res['rewards'][:n]
+        mat_action_w[i, :n] = res['action_w'][:n]
+        mat_action_c1[i, :n] = res['action_c1'][:n]
+        mat_action_c2[i, :n] = res['action_c2'][:n]
+        mat_action_vs[i, :n] = res['action_vs'][:n]
+        mat_best_fitness[i, :n] = res['best_fitness'][:n]
+        mat_policy_losses[i, :n] = res['policy_losses'][:n]
+        mat_value_losses[i, :n] = res['value_losses'][:n]
+        mat_policy_entropies[i, :n] = res['policy_entropies'][:n]
+
+    multi_run_mat_path = os.path.join(matlab_dir, 'trpo_multi_run_data.mat')
+    savemat(multi_run_mat_path, {
+        'algorithm': 'TRPO', 'num_runs': num_runs, 'num_episodes': num_eps,
+        'seeds': np.array(args.seeds), 'episodes': np.arange(1, num_eps + 1),
+        'all_rewards': mat_rewards, 'all_action_w': mat_action_w, 'all_action_c1': mat_action_c1,
+        'all_action_c2': mat_action_c2, 'all_action_vs': mat_action_vs, 'all_best_fitness': mat_best_fitness,
+        'all_policy_losses': mat_policy_losses, 'all_value_losses': mat_value_losses,
+        'all_policy_entropies': mat_policy_entropies,
+        'mean_rewards': np.mean(mat_rewards, axis=0), 'std_rewards': np.std(mat_rewards, axis=0),
+        'mean_action_w': np.mean(mat_action_w, axis=0), 'std_action_w': np.std(mat_action_w, axis=0),
+        'mean_action_c1': np.mean(mat_action_c1, axis=0), 'std_action_c1': np.std(mat_action_c1, axis=0),
+        'mean_action_c2': np.mean(mat_action_c2, axis=0), 'std_action_c2': np.std(mat_action_c2, axis=0),
+        'mean_action_vs': np.mean(mat_action_vs, axis=0), 'std_action_vs': np.std(mat_action_vs, axis=0),
     })
-    print(f"Training data saved to: {mat_path}")
-    
-    # 打印奖励计算器统计
+    print(f"\n📊 汇总数据已保存到: {multi_run_mat_path}")
+
+    for i, res in enumerate(all_run_results):
+        run_mat_path = os.path.join(matlab_dir, f'trpo_run_{i+1}.mat')
+        savemat(run_mat_path, {
+            'algorithm': 'TRPO', 'seed': res['seed'],
+            'episodes': np.arange(1, len(res['rewards']) + 1),
+            'mean_rewards': res['rewards'], 'best_fitness': res['best_fitness'],
+            'policy_losses': res['policy_losses'], 'value_losses': res['value_losses'],
+            'policy_dist_entropy': res['policy_entropies'],
+            'action_w': res['action_w'], 'action_c1': res['action_c1'],
+            'action_c2': res['action_c2'], 'action_vs': res['action_vs'],
+        })
+    print(f"📊 各 run 独立数据已保存: trpo_run_1.mat ~ trpo_run_{num_runs}.mat")
+
     print("\n" + "=" * 60)
-    print("Reward Calculator Statistics:")
-    pso.reward_calculator.print_stats()
-    
-    # 评测并输出比较指标
-    compute_rl_metrics(all_rewards, all_action_means, pso)
-    
-    print("\n" + "=" * 60)
-    print("Training Complete!")
-    print(f"Time: {(time.time() - start_time)/60:.1f}m | Final Avg Reward: {np.mean(all_rewards[-20:]):.4f}")
-    print(f"Model: {save_path}")
-    print(f"Curves: {plot_path}")
+    print("🏁 Multi-Run Training Complete!")
+    print("=" * 60)
+    print(f"  总运行次数: {num_runs}")
+    print(f"  总耗时: {total_time/60:.1f} min")
+
+    final_rewards = [np.mean(res['rewards'][-20:]) for res in all_run_results]
+    print(f"  最终平均奖励 (last 20 eps):")
+    for i, (seed, fr) in enumerate(zip(args.seeds, final_rewards)):
+        print(f"    Run {i+1} (seed={seed}): {fr:.4f}")
+    print(f"  跨 Run 均值 ± 标准差: {np.mean(final_rewards):.4f} ± {np.std(final_rewards):.4f}")
+    print(f"\n  汇总文件: {multi_run_mat_path}")
     print("=" * 60)
 
 

@@ -105,10 +105,9 @@ class DDPGAgent(BaseRLAgent, ContinuousActionMixin):
                  use_ou_noise: bool = True,
                  device: str = 'cuda'):
         super().__init__()
-
+        
         self.state_dim = state_dim
         self._action_dim = action_dim
-        self.hidden_dims = hidden_dims  # ← 保存 hidden_dims
         self.gamma = gamma
         self.tau = tau
         self.batch_size = batch_size
@@ -257,8 +256,7 @@ class DDPGAgent(BaseRLAgent, ContinuousActionMixin):
             'critic': self.critic.state_dict(),
             'config': {
                 'state_dim': self.state_dim,
-                'action_dim': self._action_dim,
-                'hidden_dims': self.hidden_dims
+                'action_dim': self._action_dim
             }
         }, path)
         print(f"[DDPG] Model saved to {path}")
@@ -267,12 +265,8 @@ class DDPGAgent(BaseRLAgent, ContinuousActionMixin):
     def load(cls, path: str, freeze: bool = True):
         checkpoint = torch.load(path, map_location='cpu')
         config = checkpoint.get('config', {})
-        agent = cls(
-            state_dim=config.get('state_dim', 25),
-            action_dim=config.get('action_dim', 4),
-            hidden_dims=config.get('hidden_dims', [128, 128, 64])  # ← 改成旧模型的架构
-        )
-
+        agent = cls(state_dim=config.get('state_dim', 25))
+        
         agent.actor.load_state_dict(checkpoint['actor'])
         agent.critic.load_state_dict(checkpoint['critic'])
         agent.actor_target.load_state_dict(checkpoint['actor'])
@@ -284,3 +278,22 @@ class DDPGAgent(BaseRLAgent, ContinuousActionMixin):
             
         print(f"[DDPG] Loaded from {path}")
         return agent
+
+    def compute_policy_entropy(self, state: np.ndarray) -> float:
+        """
+        计算当前状态下策略分布的熵近似值 (nats)。
+        DDPG 为确定性策略，将探索噪声 (OU/Gaussian) 建模为一个等效 Gaussian，
+        计算解析熵 H = 0.5 * d * (1 + ln(2πσ²))。
+        当训练早期探索噪声大，熵高；策略收敛后探索噪声不变但确定性部分变小。
+        
+        Args:
+            state: 当前状态向量 (未使用，保持接口一致性)
+        Returns:
+            entropy: 策略分布熵近似值 (nats)
+        """
+        sigma = self.exploration_noise  # 直接用探索噪声标准差
+        d = self._action_dim
+        # Multivariate Gaussian 与生煮: H = 0.5*d*(1 + ln(2*pi*sigma^2))
+        import math
+        entropy = 0.5 * d * (1.0 + math.log(2.0 * math.pi * sigma ** 2 + 1e-8))
+        return entropy

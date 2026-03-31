@@ -377,3 +377,25 @@ class DoubleDQNAgent:
             'avg_loss': self.total_loss / max(1, self.train_steps),
             'frozen': self.frozen,
         }
+
+    def compute_policy_entropy(self, state: np.ndarray) -> float:
+        """
+        计算当前状态下策略分布的熵 (nats)。
+        DDQN 使用 Softmax (Boltzmann) 离散策略，熵有精确计算：
+        H = -sum_a p(a|s) * log(p(a|s))
+        
+        Args:
+            state: 当前状态向量
+        Returns:
+            entropy: 策略分布熵 (nats)，最大将为 ln(num_actions)
+        """
+        with torch.no_grad():
+            state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
+            q_values = self.model(state_tensor).squeeze(0)
+            # 使用当前温度计算 Softmax 拟定策略
+            scaled_q = q_values / (self.temperature + 1e-8)
+            probs = torch.softmax(scaled_q, dim=0)
+            # 计算 Shannon 熵
+            log_probs = torch.log(probs + 1e-8)
+            entropy = -(probs * log_probs).sum().item()
+        return entropy
