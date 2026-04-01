@@ -58,13 +58,7 @@ def run_pre_simulation_diagnostics(package_path, params_path):
     print(f"-> Max/Min Weight Ratio: {weight_max_min_ratio:.2e}")
     print(f"-> Weight C.V.: {weight_cv:.4f} (理想值 < 2.0, 风险阈值 > 5.0)")
 
-
-    print("\nSTEP 3: Surrogate-based Failure Rate Estimate")
-    # 这里模拟指示函数 (假设你已经有代理模型的初步预测，或者直接从 package 获取)
-    # 我们利用代理模型的预测结果进行加权估计
-    # 注意：Script 1 运行完毕时，importance_sampling_estimate 已经给出了基于 GP 的估计值
-    # 如果该值与 0.033225 偏差巨大，说明 q_mix 存在系统性偏置。
-
+    print("\n STEP 3: Surrogate-based Failure Rate Estimate")
     # --- 可视化诊断图 ---
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 

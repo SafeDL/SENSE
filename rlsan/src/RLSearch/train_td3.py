@@ -299,8 +299,7 @@ def run_single_experiment(args, run_idx: int, seed: int) -> dict:
         metrics = train_one_episode(pso, env, agent, args.iterations_per_episode)
 
         all_rewards.append(metrics['mean_reward'])
-        if metrics['actor_loss'] != 0.0:
-            all_actor_losses.append(metrics['actor_loss'])
+        all_actor_losses.append(metrics['actor_loss'] if metrics['actor_loss'] != 0.0 else np.nan)
         all_critic_losses.append(metrics['critic_loss'])
         all_action_means.append(metrics['action_means'])
         all_best_fitness.append(metrics['best_fitness'])

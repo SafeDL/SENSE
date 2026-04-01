@@ -103,7 +103,7 @@ def plot_density_heatmap(gmm, alpha, Z_GMM, grid_x, failure_mask, output_dir):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--is_package', type=str,
+    parser.add_argument('--importance_sampling_package', type=str,
                        default='/home/hp/SENSE/rlsan/results/s1exp/final_refined_IS_package.pkl',
                        help='Path to IS package')
     parser.add_argument('--grid_x', type=str,
