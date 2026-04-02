@@ -569,7 +569,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=2004)
     parser.add_argument('--tm_port', type=int, default=8004)
     parser.add_argument('--fixed_delta_seconds', type=float, default=0.1)
-    parser.add_argument('--budget', type=int, default=20, help='Total number of evaluations')
+    parser.add_argument('--budget', type=int, default=2000000, help='Total number of evaluations')
     parser.add_argument('--batch_size', type=int, default=2000, help='Batch size for inner loop optimization')
     parser.add_argument('--use_surrogate', type=bool, default=True, help='Use surrogate model for acceleration')
     parser.add_argument('--surrogate_model_path', type=str,
