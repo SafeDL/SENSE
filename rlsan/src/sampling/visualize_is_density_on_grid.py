@@ -1,5 +1,5 @@
 """
-可视化IS替代分布在grid测试结果上的概率密度
+可视化IS替代分布在grid测试结果上的概率密度热力图，叠加危险场景点位，并提供统计分析
 """
 import pickle
 import os.path as osp

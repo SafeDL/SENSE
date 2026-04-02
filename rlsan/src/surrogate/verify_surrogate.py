@@ -62,7 +62,6 @@ if __name__=='__main__':
     # 2. 加载数据
     with open('../../results/grid/scenario01/grid_x.pkl', 'rb') as f:
         X_data = pickle.load(f)
-        X_data = X_data[:80000, :]
     with open('./train_data/scenario01_grid_y.pkl', 'rb') as f:
         y_data = np.array(pickle.load(f)).reshape(-1, 1)
 

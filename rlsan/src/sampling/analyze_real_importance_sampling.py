@@ -1,6 +1,6 @@
 """
-读取实际的重要性采样的仿真实验结果,估计真实的加速效果
-集成相对半宽度 (Relative Half-width) 计算
+读取实际的重要性采样的仿真实验结果,评价加速性和估计结果的无偏性
+集成相对半宽度 (Relative Half-width) 作为误差估计
 """
 import numpy as np
 import pickle
@@ -74,15 +74,11 @@ def calculate_IS_error(weights, indicator, failure_estimate):
 
 def calculate_importance_sampling(X_data, y_data, q_mix_values, conf_level=0.80):
     """使用数值稳定的 SNIS 评估失效率及相对半宽度"""
-    # 强制打乱数据顺序，确保满足 i.i.d. 假设
-    # indices = np.arange(len(X_data))
-    # np.random.shuffle(indices)
-    # X_data = X_data[indices]
-    # y_data = np.array(y_data)[indices]
 
     num_of_samples = []
     IS_estimates = []
     IS_l_r_history = []  # 存储相对半宽度
+    IS_ess_ratios = []   # 存储 ESS/N 比例
 
     total_N = len(X_data)
     log_p = get_log_p(X_data)
@@ -91,10 +87,6 @@ def calculate_importance_sampling(X_data, y_data, q_mix_values, conf_level=0.80)
     indicator_all = failure_indicator(np.array(y_data))
 
     print(f"\n--- Starting IS Precision Analysis ({conf_level*100}% Confidence) ---")
-
-    # 计算校正因子 alpha
-    correct_alpha = 0.025775/0.04
-    # correct_alpha = 1
 
     step = 100
     for N in range(step, total_N + 1, step):
@@ -105,31 +97,48 @@ def calculate_importance_sampling(X_data, y_data, q_mix_values, conf_level=0.80)
         max_log_w = np.max(subset_log_w)
         weights_shifted = np.exp(subset_log_w - max_log_w)
 
-        # 1. 估计失效率 (SNIS)
-        sum_w = np.sum(weights_shifted)
-        raw_estimate = np.sum(weights_shifted * subset_indicator) / sum_w if sum_w > 0 else 0
-        failure_estimate = raw_estimate * correct_alpha
+        # 权重截断：将极端权重截断到第 99 百分位，以小偏差换取大幅降低方差
+        # 这是 IS 领域的标准做法 (Ionides 2008, Owen 2013)
+        clip_threshold = np.quantile(weights_shifted, 0.99)
+        weights_clipped = np.clip(weights_shifted, 0, clip_threshold)
 
-        # 2. 计算error
-        error = calculate_IS_error(weights=weights_shifted, indicator=subset_indicator, failure_estimate=failure_estimate)
+        # 1. 估计失效率 (SNIS with clipped weights)
+        sum_w = np.sum(weights_clipped)
+        failure_estimate = np.sum(weights_clipped * subset_indicator) / sum_w if sum_w > 0 else 0
+
+        # 2. 计算 SNIS 相对半宽度 (delta method, 比 calculate_IS_error 更稳定)
+        error = calculate_relative_half_width(
+            weights=weights_clipped,
+            indicator=subset_indicator,
+            failure_estimate=failure_estimate,
+            conf_level=conf_level,
+        )
+
+        # 3. 计算有效样本量 ESS 及其占比
+        # ESS = (Σwᵢ)² / Σwᵢ²  反映权重分布的均匀程度，ESS/N 越接近 1 越好
+        ess = np.sum(weights_clipped) ** 2 / np.sum(weights_clipped ** 2)
+        ess_ratio = ess / N
 
         IS_estimates.append(failure_estimate)
         IS_l_r_history.append(error)
+        IS_ess_ratios.append(ess_ratio)
         num_of_samples.append(N)
 
-    print(f"Final Estimate: {IS_estimates[-1]:.6f}, Final l_r: {IS_l_r_history[-1]:.4f}")
+    final_ess_ratio = IS_ess_ratios[-1]
+    print(f"Final Estimate:  {IS_estimates[-1]:.6f}")
+    print(f"Final l_r:       {IS_l_r_history[-1]:.4f}")
+    print(f"Final ESS/N:     {final_ess_ratio:.4f}  "
+          f"({'良好' if final_ess_ratio > 0.1 else '偏低，提案分布与目标分布失配严重'})")
 
     # --- 绘图 ---
     fig, axes = plt.subplots(2, 1, figsize=(8, 10))
     axes[0].plot(num_of_samples, IS_estimates, color='C0', label='IS Estimate')
-    axes[0].axhline(y=0.025775, color='r', linestyle='--', label='Baseline')
     axes[0].set_ylabel('Failure Rate')
     axes[0].set_title('IS Failure Rate Convergence')
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
     axes[1].plot(num_of_samples, IS_l_r_history, color='C1', label='Relative error')
-    axes[1].axhline(y=0.05, color='red', linestyle='--', label=r'Target Accuracy')
     axes[1].set_xlabel('Sample Size')
     axes[1].set_ylabel('l_r ')
     axes[1].set_title(f'Statistical Precision ($l_r$)')
@@ -137,11 +146,11 @@ def calculate_importance_sampling(X_data, y_data, q_mix_values, conf_level=0.80)
     axes[1].legend()
 
     plt.tight_layout()
-    plt.savefig('../../results/s5exp/IS_Precision_Analysis.png')
+    plt.savefig('../../results/s1exp/IS_Precision_Analysis.png')
     plt.show()
 
     # --- Excel 写入 ---
-    excel_path = '../../results/s5exp/SamplingResults.xlsx'
+    excel_path = '../../results/s1exp/SamplingResults.xlsx'
     try:
         workbook = openpyxl.load_workbook(excel_path)
         worksheet = workbook.worksheets[1]
@@ -158,25 +167,14 @@ if __name__ == "__main__":
     np.random.seed(42)
 
     # 路径根据实际情况调整
-    params_file = osp.join('../../results/IS/scenario05/scenario05_20251228', 'sampled_parameters.pkl')
-    scores_file = osp.join('../../results/s5exp', 'IS_simulation_scores_20251228.pkl')
-    package = load_data( '../../results/s5exp/final_refined_IS_package_20251228.pkl')
+    params_file = osp.join('../../results/IS/scenario01', 'sampled_parameters.pkl')
+    scores_file = osp.join('../../results/s1exp', 'IS_simulation_scores.pkl')
+    package = load_data( '../../results/s1exp/final_refined_IS_package.pkl')
 
     X_data = load_data(params_file)
     y_data = load_data(scores_file)
     log_q_mix_values = package['log_q_mix_values']
     q_mix_values = np.exp(log_q_mix_values)
 
-
-    # 绘制 q_mix 的直方图
-    plt.figure(figsize=(6, 4))
-    plt.hist(q_mix_values, bins=50, color="skyblue", edgecolor="black", alpha=0.7)
-    plt.xlabel(r"$q_{\mathrm{mix}}(x)$", fontsize=12)
-    plt.ylabel("Frequency", fontsize=12)
-    plt.title("Distribution of $q_{mix}$ values", fontsize=14)
-    plt.grid(True, linestyle="--", alpha=0.5)
-    plt.tight_layout()
-    plt.show()
-
     min_len = min(len(X_data), len(y_data), len(q_mix_values))
-    calculate_importance_sampling(X_data[:min_len], y_data[:min_len], q_mix_values[:min_len], conf_level=0.95)
+    calculate_importance_sampling(X_data[:min_len], y_data[:min_len], q_mix_values[:min_len], conf_level=0.80)

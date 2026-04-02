@@ -1,6 +1,6 @@
 """
 Importance Sampling Pre-Simulation Diagnostic Tool
-用于在真实仿真前验证替代分布 q_mix 的合理性与统计一致性
+用以通过ESS等权重指标来提前判断重要性采样的失效率估计结果是否可靠(低方差)
 """
 import numpy as np
 import pickle

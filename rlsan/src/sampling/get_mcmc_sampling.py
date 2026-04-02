@@ -94,7 +94,7 @@ if __name__ == "__main__":
     np.random.seed(42)
 
     # 加载代理模型
-    model_path = '../../results/s8exp/surrogate_model.pkl'
+    model_path = '../../results/s1exp/surrogate_model.pkl'
     gp_model, gp_likelihood = load_surrogate_model(model_path)
     gp_model.to("cuda"); gp_likelihood.to("cuda")
     print("Global GP Model loaded successfully.")
