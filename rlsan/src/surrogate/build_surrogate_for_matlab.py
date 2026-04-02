@@ -1,5 +1,5 @@
 """
-使用一个单一的全局高斯回归过程模型,并使用 Matern 核函数和 ARD 技术来提升模型的表达能力
+以scenario 05为例,将结果保存为mat文件便于和其他类型的代理模型比较
 """
 import numpy as np
 import torch
